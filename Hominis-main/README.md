@@ -3,7 +3,7 @@
 Sistema completo e inteligente de gestão de recursos humanos e segurança do trabalho com ranking dinâmico de colaboradores.
 
 ## Recursos Principais 
- 
+     
 ### 🎯 Ranking Inteligente
 - **Sistema dinâmico e configurável** de avaliação de colaboradores
 - **Critérios personalizáveis** com pesos ajustáveis em tempo real
