@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Trophy, Download, Filter, TrendingUp, TrendingDown, FileText, Info, CheckCircle2, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react';
 // Removed framer-motion to fix DOM errors
-import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar, Legend } from 'recharts';
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar, Legend, LabelList } from 'recharts';
 import MRSCard from './MRSCard';
 import { calculateIntelligentRanking, RankingResult, generatePerformanceData } from '../../lib/rankingEngine';
 import { formatNumber, getCurrentMonth } from '../../lib/format';
@@ -36,66 +36,6 @@ export default function RankingInteligente() {
 
   const { periods: availablePeriods } = useAvailablePeriods();
 
-  const loadConsolidatedRankings = async () => {
-    try {
-      console.log('Iniciando carregamento consolidado...');
-      const { data: rankingsData, error } = await supabase
-        .from('employee_rankings')
-        .select(`
-          employee_id,
-          employee_name,
-          department,
-          photo_url,
-          total_score
-        `);
-
-      if (error) {
-        console.error('Erro ao buscar dados:', error);
-        throw error;
-      }
-
-      console.log('Dados brutos recebidos:', rankingsData?.length || 0, 'registros');
-
-      if (!rankingsData || rankingsData.length === 0) {
-        console.warn('Nenhum ranking encontrado no banco');
-        return [];
-      }
-
-      const consolidated = rankingsData.reduce((acc, ranking) => {
-        const key = ranking.employee_id;
-        if (!acc[key]) {
-          acc[key] = {
-            employee_id: ranking.employee_id,
-            employee_name: ranking.employee_name,
-            department: ranking.department,
-            photo_url: ranking.photo_url,
-            total_score: 0,
-            rank_position: 0,
-            scores: {},
-            period: 'Consolidado'
-          };
-        }
-        acc[key].total_score += ranking.total_score;
-        return acc;
-      }, {} as Record<string, RankingResult>);
-
-      const sortedResults = Object.values(consolidated)
-        .sort((a, b) => b.total_score - a.total_score)
-        .map((result, index) => ({
-          ...result,
-          rank_position: index + 1
-        }));
-
-      console.log('Rankings consolidados processados:', sortedResults.length, 'colaboradores');
-      console.log('Top 3:', sortedResults.slice(0, 3).map(r => `${r.employee_name}: ${r.total_score.toFixed(2)}`));
-
-      return sortedResults;
-    } catch (error) {
-      console.error('Erro ao carregar rankings consolidados:', error);
-      return [];
-    }
-  };
-
   useEffect(() => {
     let isMounted = true;
 
@@ -108,16 +48,11 @@ export default function RankingInteligente() {
       if (isMounted) {
         try {
           let results: RankingResult[];
+          const periodToLoad = !selectedPeriod || selectedPeriod === '' ? 'consolidated' : selectedPeriod;
 
-          if (!selectedPeriod || selectedPeriod === '') {
-            console.log('Carregando rankings consolidados (todos os períodos)');
-            results = await loadConsolidatedRankings();
-            console.log('Rankings consolidados carregados:', results.length);
-          } else {
-            console.log('Carregando rankings para período:', selectedPeriod);
-            results = await calculateIntelligentRanking(selectedPeriod, true);
-            console.log('Rankings carregados:', results.length);
-          }
+          console.log(`Carregando rankings para o período: ${periodToLoad}`);
+          results = await calculateIntelligentRanking(periodToLoad, true);
+          console.log(`Rankings para '${periodToLoad}' carregados:`, results.length);
 
           if (isMounted) {
             setRankings(results);
@@ -424,6 +359,16 @@ export default function RankingInteligente() {
     }
     return [selectedDepartment];
   }, [departments, selectedDepartment]);
+
+  const chartDataWithCriteria = useMemo(() => {
+    return filteredRankings.map(employee => {
+      const employeeData: { [key: string]: any } = { employee_name: employee.employee_name, total_score: employee.total_score };
+      criteria.forEach(criterion => {
+        employeeData[criterion.name] = employee.criterion_scores.find(cs => cs.criterion_id === criterion.id)?.weighted_score || 0;
+      });
+      return employeeData;
+    }).sort((a, b) => b.total_score - a.total_score);
+  }, [filteredRankings, criteria]);
 
   if (loading && rankings.length === 0) {
     return (
@@ -1026,12 +971,20 @@ export default function RankingInteligente() {
 
       <MRSCard title={`Todos os Colaboradores - Visualização Gráfica (${filteredRankings.length})`} collapsible>
         <ResponsiveContainer width="100%" height={Math.max(filteredRankings.length * 50 + 50, 300)}>
-          <BarChart data={filteredRankings} layout="vertical">
+          <BarChart data={chartDataWithCriteria} layout="vertical" margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis type="number" />
             <YAxis dataKey="employee_name" type="category" width={150} />
-            <Tooltip />
-            <Bar dataKey="total_score" fill="#ffcc00" radius={[0, 8, 8, 0]} />
+            <Tooltip formatter={(value: any) => typeof value === 'number' ? value.toFixed(2) : value} />
+            <Legend />
+            {criteria.map((criterion, index) => {
+              const colors = ['#002b55', '#ffcc00', '#10b981', '#ef4444', '#3b82f6', '#f97316', '#8b5cf6'];
+              return (
+                <Bar key={criterion.id} dataKey={criterion.name} stackId="a" fill={colors[index % colors.length]}>
+                  <LabelList dataKey={criterion.name} position="inside" formatter={(value: number) => formatNumber(value, 2)} fill="#fff" fontSize={10} />
+                </Bar>
+              );
+            })}
           </BarChart>
         </ResponsiveContainer>
       </MRSCard>

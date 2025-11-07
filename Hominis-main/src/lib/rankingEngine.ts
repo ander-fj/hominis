@@ -43,7 +43,9 @@ export async function calculateIntelligentRanking(period: string, useCache: bool
       return [];
     }
 
-    if (useCache) {
+    const isConsolidated = period === 'consolidated';
+
+    if (useCache && !isConsolidated) {
       const cached = rankingCache.get(period);
       if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
         console.log('Usando dados em cache');
@@ -51,34 +53,28 @@ export async function calculateIntelligentRanking(period: string, useCache: bool
       }
     }
 
-    const previousMonth = getPreviousMonth(period);
+    const previousMonth = isConsolidated ? '' : getPreviousMonth(period);
 
-    const [criteriaResult, scoresResult, employeesResult, previousRankingsResult, allScoresResult] = await Promise.all([
+    let scoresQuery = supabase.from('employee_scores').select('*');
+    if (!isConsolidated) {
+      scoresQuery = scoresQuery.eq('period', period);
+    }
+
+    const [criteriaResult, scoresResult, employeesResult, previousRankingsResult] = await Promise.all([
       supabase.from('evaluation_criteria').select('*').eq('active', true).order('display_order'),
-      supabase.from('employee_scores').select('*').eq('period', period),
+      scoresQuery,
       supabase.from('employees').select('*').eq('active', true),
-      supabase.from('employee_rankings').select('*').eq('period', previousMonth),
-      supabase.from('employee_scores').select('*')
+      isConsolidated ? Promise.resolve({ data: [], error: null }) : supabase.from('employee_rankings').select('*').eq('period', previousMonth),
     ]);
 
-    if (criteriaResult.error) {
-      console.error('Erro ao buscar critérios:', criteriaResult.error);
-      throw criteriaResult.error;
-    }
-    if (scoresResult.error) {
-      console.error('Erro ao buscar scores:', scoresResult.error);
-      throw scoresResult.error;
-    }
-    if (employeesResult.error) {
-      console.error('Erro ao buscar colaboradores:', employeesResult.error);
-      throw employeesResult.error;
-    }
+    if (criteriaResult.error) throw criteriaResult.error;
+    if (scoresResult.error) throw scoresResult.error;
+    if (employeesResult.error) throw employeesResult.error;
 
     const criteria = criteriaResult.data;
-    const scores = scoresResult.data;
+    let scores = scoresResult.data || [];
     const employees = employeesResult.data;
     const previousRankings = previousRankingsResult.data || [];
-    const allScores = allScoresResult.data || [];
 
     if (!criteria || criteria.length === 0) {
       console.warn('Nenhum critério ativo encontrado');
@@ -90,92 +86,97 @@ export async function calculateIntelligentRanking(period: string, useCache: bool
       return [];
     }
 
-  const totalWeight = criteria.reduce((sum, c) => sum + c.weight, 0);
-  if (Math.abs(totalWeight - 100) > 0.01) {
-    console.warn(`Soma dos pesos: ${totalWeight}% (esperado: 100%)`);
-  }
+    const totalWeight = criteria.reduce((sum, c) => sum + c.weight, 0);
+    if (Math.abs(totalWeight - 100) > 0.01) {
+      console.warn(`Soma dos pesos: ${totalWeight}% (esperado: 100%)`);
+    }
 
-  const normalizedScores = normalizeAllScores(criteria, scores || [], employees);
+    let normalizedScores: Array<{ employee_id: string; criterion_id: string; raw_value: number; normalized_score: number }>;
 
-  await updateNormalizedScores(normalizedScores, period);
+    if (isConsolidated) {
+      const scoreGroups = new Map<string, { raw_values: number[], normalized_scores: number[], employee_id: string, criterion_id: string }>();
 
-  const rankings: RankingResult[] = employees.map(employee => {
-    let totalScore = 0;
-    const criterionScores: CriterionScore[] = [];
+      for (const score of scores) {
+        const key = `${score.employee_id}-${score.criterion_id}`;
+        if (!scoreGroups.has(key)) {
+          scoreGroups.set(key, { raw_values: [], normalized_scores: [], employee_id: score.employee_id, criterion_id: score.criterion_id });
+        }
+        scoreGroups.get(key)!.raw_values.push(score.raw_value);
+        if (score.normalized_score !== null) {
+          scoreGroups.get(key)!.normalized_scores.push(score.normalized_score);
+        }
+      }
 
-    criteria.forEach(criterion => {
-      const scoreEntry = normalizedScores.find(
-        ns => ns.employee_id === employee.id && ns.criterion_id === criterion.id
-      );
-
-      const normalizedScore = scoreEntry?.normalized_score || 0;
-      const rawValue = scoreEntry?.raw_value || 0;
-      const weightedScore = (normalizedScore * criterion.weight) / 100;
-
-      totalScore += weightedScore;
-      criterionScores.push({
-        criterion_id: criterion.id,
-        criterion_name: criterion.name,
-        raw_value: rawValue,
-        normalized_score: normalizedScore,
-        weight: criterion.weight,
-        weighted_score: weightedScore,
+      normalizedScores = Array.from(scoreGroups.values()).map(data => {
+        const sumRawValue = data.raw_values.reduce((a, b) => a + b, 0);
+        const sumNormalizedScore = data.normalized_scores.reduce((a, b) => a + b, 0);
+        
+        return {
+          employee_id: data.employee_id,
+          criterion_id: data.criterion_id,
+          raw_value: sumRawValue,
+          normalized_score: sumNormalizedScore,
+        };
       });
+      console.log('Aggregated & Summed Normalized Scores:', normalizedScores);
+
+    } else {
+      normalizedScores = normalizeAllScores(criteria, scores, employees);
+      await updateNormalizedScores(normalizedScores, period);
+    }
+
+    const rankings: RankingResult[] = employees.map(employee => {
+      let totalScore = 0;
+      const criterionScores: CriterionScore[] = [];
+
+      criteria.forEach(criterion => {
+        const scoreEntry = normalizedScores.find(
+          ns => ns.employee_id === employee.id && ns.criterion_id === criterion.id
+        );
+
+        const normalizedScore = scoreEntry?.normalized_score || 0;
+        const rawValue = scoreEntry?.raw_value || 0;
+        const weightedScore = (normalizedScore * criterion.weight) / 100;
+
+        totalScore += weightedScore;
+        criterionScores.push({
+          criterion_id: criterion.id,
+          criterion_name: criterion.name,
+          raw_value: rawValue,
+          normalized_score: normalizedScore,
+          weight: criterion.weight,
+          weighted_score: weightedScore,
+        });
+      });
+
+      const analysis = analyzePerformance(criterionScores, criteria);
+
+      return {
+        employee_id: employee.id,
+        employee_name: employee.name,
+        employee_email: employee.email,
+        department: employee.department,
+        position: employee.position,
+        photo_url: employee.photo_url,
+        total_score: Math.round(totalScore * 100) / 100,
+        rank_position: 0,
+        criterion_scores: criterionScores,
+        strengths: analysis.strengths,
+        weaknesses: analysis.weaknesses,
+        suggestions: analysis.suggestions,
+      };
     });
 
-    const analysis = analyzePerformance(criterionScores, criteria);
-
-    const assiduityScores = allScores.filter(s =>
-      s.employee_id === employee.id &&
-      criteria.find(c => c.id === s.criterion_id && c.name === 'Assiduidade')
-    );
-
-    const punctualityScores = allScores.filter(s =>
-      s.employee_id === employee.id &&
-      criteria.find(c => c.id === s.criterion_id && c.name === 'Pontualidade')
-    );
-
-    let absencesCount = 0;
-    let lateCount = 0;
-
-    assiduityScores.forEach(s => {
-      const assiduity = parseFloat(String(s.raw_value));
-      if (!isNaN(assiduity) && assiduity >= 0 && assiduity <= 100) {
-        absencesCount += Math.round((100 - assiduity) / 5);
-      }
-    });
-
-    punctualityScores.forEach(s => {
-      const punctuality = parseFloat(String(s.raw_value));
-      if (!isNaN(punctuality) && punctuality >= 0) {
-        lateCount += Math.round(punctuality);
-      }
-    });
-
-    return {
-      employee_id: employee.id,
-      employee_name: employee.name,
-      employee_email: employee.email,
-      department: employee.department,
-      position: employee.position,
-      photo_url: employee.photo_url,
-      total_score: Math.round(totalScore * 100) / 100,
-      rank_position: 0,
-      criterion_scores: criterionScores,
-      strengths: analysis.strengths,
-      weaknesses: analysis.weaknesses,
-      suggestions: analysis.suggestions,
-      absences_count: absencesCount,
-      late_count: lateCount,
-    };
-  });
+    if (isConsolidated) {
+      console.log('Final Rankings:', rankings);
+    }
 
     rankings.sort((a, b) => b.total_score - a.total_score);
 
     rankings.forEach((ranking, index) => {
       ranking.rank_position = index + 1;
 
-      if (previousRankings && previousRankings.length > 0) {
+      if (!isConsolidated && previousRankings && previousRankings.length > 0) {
         const prevRank = previousRankings.find(pr => pr.employee_id === ranking.employee_id);
         if (prevRank) {
           ranking.previous_rank = prevRank.rank_position;
@@ -184,9 +185,10 @@ export async function calculateIntelligentRanking(period: string, useCache: bool
       }
     });
 
-    await saveRankings(rankings, period);
-
-    rankingCache.set(period, { data: rankings, timestamp: Date.now() });
+    if (!isConsolidated) {
+      await saveRankings(rankings, period);
+      rankingCache.set(period, { data: rankings, timestamp: Date.now() });
+    }
 
     return rankings;
   } catch (error) {

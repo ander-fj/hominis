@@ -110,40 +110,47 @@ export default function DashboardRH() {
       const activeEmployees = totalEmployees;
       const departments = new Set(employees?.map(e => e.department));
 
-      // Calculate department distribution
+      // Calcular distribuição por departamento
       const deptCounts = new Map<string, number>();
       employees?.forEach(emp => {
         deptCounts.set(emp.department, (deptCounts.get(emp.department) || 0) + 1);
       });
       const deptData = Array.from(deptCounts.entries())
         .map(([department, count]) => ({ department, count }))
-        .sort((a, b) => b.count - a.count);
+        .sort((a, b) => b.count - a.count); // Ordenar por contagem decrescente
       setDepartmentData(deptData);
 
-      const assiduityScores = scores?.filter(s => s.evaluation_criteria?.name === 'Assiduidade') || [];
-      const avgAssiduity = assiduityScores.length > 0
-        ? assiduityScores.reduce((sum, s) => sum + parseFloat(s.raw_value), 0) / assiduityScores.length
-        : 0;
+      // Calcular faltas e atrasos totais para o período selecionado
+      let totalAbsencesOverall = 0;
+      const allAssiduityScores = scores?.filter(s => s.evaluation_criteria?.name === 'Assiduidade') || [];
+      allAssiduityScores.forEach(s => {
+        const assiduityPercentage = parseFloat(s.raw_value); // raw_value é a % de assiduidade
+        totalAbsencesOverall += (100 - assiduityPercentage) / 5; // Faltas = (100 - assiduidade) / 5
+      });
+      totalAbsencesOverall = Math.round(totalAbsencesOverall);
 
-      const absences = Math.round((100 - avgAssiduity) * totalEmployees / 100);
+      let totalDelaysOverall = 0;
+      const allPunctualityScores = scores?.filter(s => s.evaluation_criteria?.name === 'Pontualidade') || [];
+      allPunctualityScores.forEach(s => {
+        totalDelaysOverall += parseFloat(s.raw_value); // raw_value é o número de atrasos
+      });
+      totalDelaysOverall = Math.round(totalDelaysOverall);
 
-      const punctualityScores = scores?.filter(s => s.evaluation_criteria?.name === 'Pontualidade') || [];
-      const avgPunctuality = punctualityScores.length > 0
-        ? punctualityScores.reduce((sum, s) => sum + parseFloat(s.raw_value), 0) / punctualityScores.length
+      const avgAssiduityOverall = allAssiduityScores.length > 0
+        ? allAssiduityScores.reduce((sum, s) => sum + parseFloat(s.raw_value), 0) / allAssiduityScores.length
         : 0;
-      const delays = Math.round(avgPunctuality);
 
       const hoursScores = scores?.filter(s => s.evaluation_criteria?.name === 'Horas Trabalhadas') || [];
       const averageHours = hoursScores.length > 0
         ? hoursScores.reduce((sum, s) => sum + parseFloat(s.raw_value), 0) / hoursScores.length
         : 0;
 
-      const absenteeismRate = 100 - avgAssiduity;
-
+      const absenteeismRate = 100 - avgAssiduityOverall;
+      
       setStats({
         totalEmployees,
-        absences,
-        delays,
+        absences: totalAbsencesOverall,
+        delays: totalDelaysOverall,
         averageHours,
         activeEmployees,
         departmentCount: departments.size,
@@ -153,25 +160,29 @@ export default function DashboardRH() {
       // Load chart data: show employees for short periods, months for longer periods
       const monthlyChartData: MonthlyData[] = [];
 
-      // Always show individual employees for all periods
+      // Dados para o gráfico de barras de Faltas e Atrasos por Colaborador
       const employeesWithScores = employees || [];
-
       for (const emp of employeesWithScores) {
         const empScores = scores?.filter(s => s.employee_id === emp.id) || [];
 
-        const faltasScores = empScores.filter(s => s.evaluation_criteria?.name === 'Assiduidade');
-        const avgAssiduity = faltasScores.length > 0
-          ? faltasScores.reduce((sum, s) => sum + parseFloat(s.raw_value), 0) / faltasScores.length
-          : 100;
-        const faltas = Math.max(0, Math.round((100 - avgAssiduity) / 5));
+        let faltas = 0;
+        const assiduityScoresEmp = empScores.filter(s => s.evaluation_criteria?.name === 'Assiduidade');
+        assiduityScoresEmp.forEach(s => {
+          const assiduityPercentage = parseFloat(s.raw_value);
+          faltas += (100 - assiduityPercentage) / 5;
+        });
+        faltas = Math.round(faltas);
 
-        const atrasosScores = empScores.filter(s => s.evaluation_criteria?.name === 'Pontualidade');
-        const atrasos = atrasosScores.length > 0
-          ? Math.max(0, Math.round(atrasosScores.reduce((sum, s) => sum + parseFloat(s.raw_value), 0)))
-          : 0;
+        let atrasos = 0;
+        const punctualityScoresEmp = empScores.filter(s => s.evaluation_criteria?.name === 'Pontualidade');
+        punctualityScoresEmp.forEach(s => {
+          atrasos += parseFloat(s.raw_value);
+        });
+        atrasos = Math.round(atrasos);
 
         monthlyChartData.push({
-          month: emp.name.split(' ')[0],
+          // Usar apenas o primeiro nome para evitar sobreposição no gráfico
+          month: emp.name.split(' ')[0], 
           faltas,
           atrasos,
         });
@@ -199,39 +210,58 @@ export default function DashboardRH() {
           const monthStart = new Date(date.getFullYear(), date.getMonth(), 1).toISOString().split('T')[0];
           const monthEnd = new Date(date.getFullYear(), date.getMonth() + 1, 0).toISOString().split('T')[0];
 
-          const { data: monthScores } = await supabase
+          let monthScoresQuery = supabase
             .from('employee_scores')
             .select('raw_value, evaluation_criteria(name)')
             .gte('period', monthStart)
             .lte('period', monthEnd);
 
-          const monthAssiduityScores = monthScores?.filter(s => s.evaluation_criteria?.name === 'Assiduidade') || [];
-          const monthAvgAssiduity = monthAssiduityScores.length > 0 ? monthAssiduityScores.reduce((sum, s) => sum + parseFloat(s.raw_value), 0) / monthAssiduityScores.length : 100;
-          const totalFaltas = Math.max(0, Math.round(((100 - monthAvgAssiduity) / 100) * totalEmployees));
+          if (selectedEmployee !== 'all') {
+            monthScoresQuery = monthScoresQuery.eq('employee_id', selectedEmployee);
+          }
 
-          const monthPunctualityScores = monthScores?.filter(s => s.evaluation_criteria?.name === 'Pontualidade') || [];
-          const totalAtrasos = monthPunctualityScores.reduce((sum, s) => sum + parseFloat(s.raw_value), 0);
+          const { data: monthScores, error: monthScoresError } = await monthScoresQuery;
 
-          evolutionData.push({ month: monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1), Faltas: totalFaltas, Atrasos: Math.round(totalAtrasos) });
+          if (monthScoresError) {
+            console.error(`Erro ao carregar scores para ${monthLabel}:`, monthScoresError);
+            continue;
+          }
+
+          let totalFaltasMonth = 0;
+          monthScores?.filter(s => s.evaluation_criteria?.name === 'Assiduidade').forEach(s => {
+            totalFaltasMonth += (100 - parseFloat(s.raw_value)) / 5;
+          });
+          totalFaltasMonth = Math.round(totalFaltasMonth);
+
+          let totalAtrasosMonth = 0;
+          monthScores?.filter(s => s.evaluation_criteria?.name === 'Pontualidade').forEach(s => {
+            totalAtrasosMonth += parseFloat(s.raw_value);
+          });
+          totalAtrasosMonth = Math.round(totalAtrasosMonth);
+
+          evolutionData.push({ month: monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1), Faltas: totalFaltasMonth, Atrasos: totalAtrasosMonth });
         }
       } else {
         // Agrupar por dia para períodos curtos
-        const { data: periodScores } = await supabase
-          .from('employee_scores')
-          .select('raw_value, evaluation_criteria(name)')
-          .gte('period', startDate)
-          .lte('period', endDate);
-
-        const dailyData = new Map<string, { faltas: number; atrasos: number }>();
-
-        periodScores?.forEach(score => {
-          // Esta parte precisaria de uma lógica mais complexa para agrupar por dia,
-          // por simplicidade, vamos manter a lógica mensal por enquanto.
-          // A implementação diária será adicionada em uma próxima etapa.
+        // Para períodos curtos, somar todas as faltas e atrasos dentro do período
+        let totalFaltasPeriod = 0;
+        const assiduityScoresPeriod = scores?.filter(s => s.evaluation_criteria?.name === 'Assiduidade') || [];
+        assiduityScoresPeriod.forEach(s => {
+          const assiduityPercentage = parseFloat(s.raw_value);
+          totalFaltasPeriod += (100 - assiduityPercentage) / 5;
         });
-        // Por enquanto, vamos replicar a lógica mensal para períodos curtos para não quebrar.
-        // O ideal seria agrupar por dia.
-        evolutionData.push({ month: getPeriodLabel(selectedPeriod), Faltas: stats.absences, Atrasos: stats.delays });
+        totalFaltasPeriod = Math.round(totalFaltasPeriod);
+
+        let totalAtrasosPeriod = 0;
+        const punctualityScoresPeriod = scores?.filter(s => s.evaluation_criteria?.name === 'Pontualidade') || [];
+        punctualityScoresPeriod.forEach(s => {
+          totalAtrasosPeriod += parseFloat(s.raw_value);
+        });
+        totalAtrasosPeriod = Math.round(totalAtrasosPeriod);
+
+        if (scores && scores.length > 0) {
+            evolutionData.push({ month: getPeriodLabel(selectedPeriod), Faltas: totalFaltasPeriod, Atrasos: totalAtrasosPeriod });
+        }
       }
       setMonthlyEvolutionData(evolutionData);
 

@@ -130,6 +130,9 @@ export interface Database {
           department: string
           created_at: string
           updated_at: string
+          employee_name: string
+          photo_url: string | null
+          criterion_details: Json | null
         }
         Insert: {
           id?: string
@@ -140,6 +143,9 @@ export interface Database {
           department: string
           created_at?: string
           updated_at?: string
+          employee_name: string
+          photo_url?: string | null
+          criterion_details?: Json | null
         }
         Update: {
           id?: string
@@ -150,6 +156,9 @@ export interface Database {
           department?: string
           created_at?: string
           updated_at?: string
+          employee_name?: string
+          photo_url?: string | null
+          criterion_details?: Json | null
         }
       }
       sst_trainings: {
@@ -374,25 +383,27 @@ export interface Database {
         Row: {
           id: string
           employee_id: string
-          comment_text: string
+          comment: string
           image_url: string | null
           created_by: string
           created_at: string
           updated_at: string
+          criterion_details: Json | null
         }
         Insert: {
           id?: string
           employee_id: string
-          comment_text: string
+          comment: string
           image_url?: string | null
           created_by?: string
           created_at?: string
           updated_at?: string
+          criterion_details?: Json | null
         }
         Update: {
           id?: string
           employee_id?: string
-          comment_text?: string
+          comment?: string
           image_url?: string | null
           created_by?: string
           created_at?: string

@@ -784,17 +784,20 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
   const [comments, setComments] = useState<any[]>([]);
   const [rankings, setRankings] = useState<any[]>([]);
   const [employeeRanking, setEmployeeRanking] = useState<RankingResult | null>(null);
+  const [absencesDelaysEvolution, setAbsencesDelaysEvolution] = useState<Array<{ month: string; Faltas: number; Atrasos: number }>>([]);
   const [loading, setLoading] = useState(true);
   const [newComment, setNewComment] = useState('');
   const [commentAuthor, setCommentAuthor] = useState('');
   const [savingComment, setSavingComment] = useState(false);
+  const contentScrollRef = useRef<HTMLDivElement>(null);
+  const modalRef = useRef<HTMLDivElement>(null);
 
   const [expandedSections, setExpandedSections] = useState({
+    absencesEvolution: true,
     evolution: true,
     performance: true,
     exams: true,
     trainings: true,
-    status: true,
     comments: true
   });
   const [isFullScreen, setIsFullScreen] = useState(false);
@@ -805,6 +808,19 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
 
   useEffect(() => {
     loadEmployeeDetails();
+
+    // Auto-ajuste de scroll ao abrir o modal
+    if (modalRef.current) {
+      modalRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [employee.id]);
+
+  // Scroll content to top when modal goes full screen
+  useEffect(() => {
+    if (isFullScreen && contentScrollRef.current) {
+      contentScrollRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
   }, [employee.id]);
 
   const loadEmployeeDetails = async () => {
@@ -949,6 +965,35 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
             lateCount,
             criterionScores
           });
+
+          // Calcular evolução de faltas e atrasos
+          const evolutionScoresByMonth: { [month: string]: { absences: number; delays: number } } = {};
+          allScores.forEach(score => {
+            const period = score.period.substring(0, 7); // YYYY-MM
+            if (!evolutionScoresByMonth[period]) {
+              evolutionScoresByMonth[period] = { absences: 0, delays: 0 };
+            }
+
+            if (criteriaData.find(c => c.id === score.criterion_id && c.name === 'Assiduidade')) {
+              const assiduity = parseFloat(String(score.raw_value));
+              if (!isNaN(assiduity)) {
+                evolutionScoresByMonth[period].absences += Math.round((100 - assiduity) / 5);
+              }
+            } else if (criteriaData.find(c => c.id === score.criterion_id && c.name === 'Pontualidade')) {
+              const punctuality = parseFloat(String(score.raw_value));
+              if (!isNaN(punctuality)) {
+                evolutionScoresByMonth[period].delays += Math.round(punctuality);
+              }
+            }
+          });
+
+          const evolutionChartData = Object.keys(evolutionScoresByMonth).sort().map(month => {
+            const [year, monthNum] = month.split('-');
+            const monthName = new Date(parseInt(year), parseInt(monthNum) - 1, 1).toLocaleString('pt-BR', { month: 'short' });
+            return { month: `${monthName}/${year.slice(2)}`, Faltas: evolutionScoresByMonth[month].absences, Atrasos: evolutionScoresByMonth[month].delays };
+          });
+
+          setAbsencesDelaysEvolution(evolutionChartData);
         }
       } else {
         console.log('❌ Sem dados de ranking para o colaborador');
@@ -1053,7 +1098,7 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
   };
 
   return (
-    <div className={`fixed inset-0 bg-black/50 flex items-center justify-center z-50 ${isFullScreen ? 'p-0' : 'p-4'}`}>
+    <div ref={modalRef} className={`fixed inset-0 bg-black/50 flex items-center justify-center z-50 ${isFullScreen ? 'p-0' : 'p-4'}`}>
       <motion.div
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
@@ -1161,6 +1206,52 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
             </div>
           ) : (
             <>
+              {absencesDelaysEvolution.length > 0 && (
+                <div className="bg-white border border-gray-200 rounded-xl p-6">
+                  <div
+                    className="flex items-center justify-between mb-4 cursor-pointer"
+                    onClick={() => toggleSection('absencesEvolution')}
+                  >
+                    <div className="flex items-center gap-3">
+                      <TrendingUp className="w-6 h-6 text-[#002b55]" />
+                      <h3 className="text-xl font-bold text-[#002b55]">Evolução de Faltas e Atrasos (Todos os Períodos)</h3>
+                    </div>
+                    <ChevronDown
+                      className={`w-5 h-5 text-[#002b55] transition-transform ${
+                        expandedSections.absencesEvolution ? 'transform rotate-180' : ''
+                      }`}
+                    />
+                  </div>
+                  {expandedSections.absencesEvolution && (
+                  <div className="h-80">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={absencesDelaysEvolution}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="month" />
+                        <YAxis allowDecimals={false} />
+                        <Tooltip />
+                        <Legend />
+                        <Line
+                          type="monotone"
+                          dataKey="Faltas"
+                          stroke="#ef4444"
+                          strokeWidth={2}
+                          dot={{ r: 5 }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="Atrasos"
+                          stroke="#f97316"
+                          strokeWidth={2}
+                          dot={{ r: 5 }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  )}
+                </div>
+              )}
+
               {rankings.length > 0 && (
                 <div className="bg-white border border-gray-200 rounded-xl p-6">
                   <div
@@ -1459,53 +1550,6 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
                 ) : (
                   <p className="text-gray-500 text-center py-4">Nenhum treinamento registrado</p>
                 )}
-                </>
-                )}
-              </div>
-
-              <div className="bg-white border border-gray-200 rounded-xl p-6">
-                <div
-                  className="flex items-center justify-between mb-4 cursor-pointer"
-                  onClick={() => toggleSection('status')}
-                >
-                  <div className="flex items-center gap-3">
-                    <TrendingUp className="w-6 h-6 text-[#002b55]" />
-                    <h3 className="text-xl font-bold text-[#002b55]">Status do Colaborador</h3>
-                  </div>
-                  <ChevronDown
-                    className={`w-5 h-5 text-[#002b55] transition-transform ${
-                      expandedSections.status ? 'transform rotate-180' : ''
-                    }`}
-                  />
-                </div>
-                {expandedSections.status && (
-                <>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="p-4 bg-gray-50 rounded-lg border border-gray-200">
-                    <p className="text-sm text-gray-600 mb-1">Status Atual</p>
-                    <p className={`text-lg font-bold ${employee.active ? 'text-green-600' : 'text-gray-600'}`}>
-                      {employee.active ? 'Ativo' : 'Inativo'}
-                    </p>
-                  </div>
-                  <div className="p-4 bg-gray-50 rounded-lg border border-gray-200">
-                    <p className="text-sm text-gray-600 mb-1">Exames em Dia</p>
-                    <p className={`text-lg font-bold ${exams.filter(e => e.status === 'valid').length === exams.length ? 'text-green-600' : 'text-red-600'}`}>
-                      {exams.filter(e => e.status === 'valid').length} de {exams.length}
-                    </p>
-                  </div>
-                  <div className="p-4 bg-gray-50 rounded-lg border border-gray-200">
-                    <p className="text-sm text-gray-600 mb-1">Treinamentos Válidos</p>
-                    <p className={`text-lg font-bold ${trainings.filter(t => t.status === 'valid').length === trainings.length ? 'text-green-600' : 'text-yellow-600'}`}>
-                      {trainings.filter(t => t.status === 'valid').length} de {trainings.length}
-                    </p>
-                  </div>
-                  <div className="p-4 bg-gray-50 rounded-lg border border-gray-200">
-                    <p className="text-sm text-gray-600 mb-1">Taxa de Presença</p>
-                    <p className="text-lg font-bold text-blue-600">
-                      {absences.length === 0 ? '100%' : 'Calcular'}
-                    </p>
-                  </div>
-                </div>
                 </>
                 )}
               </div>
