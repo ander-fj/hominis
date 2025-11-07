@@ -355,11 +355,11 @@ export default function DashboardRH() {
     <div className="space-y-2.5">
       <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-2">
         <div>
-          <h1 className="text-2xl font-bold text-[#002b55] flex items-center gap-1.5">
+          <h1 className="text-2xl font-bold text-[#002b55] flex items-center gap-3">
             <LayoutDashboard className="w-4 h-4 text-[#ffcc00]" />
-            Dashboard RH
+            Painel RH
           </h1>
-          <p className="text-gray-600 mt-1 text-base">Indicadores e métricas de gestão de pessoas</p>
+          <p className="text-gray-600 mt-1">Indicadores e métricas de gestão de pessoas</p>
         </div>
         <div className="flex flex-col md:flex-row items-start md:items-center gap-1.5">
           <PeriodFilter
@@ -405,14 +405,14 @@ export default function DashboardRH() {
           colorClass="from-[#002b55] to-[#003d73]"
         />
         <MRSStatCard
-          title="Faltas (30 dias)"
+          title="Faltas"
           value={stats.absences}
           icon={<UserX className="w-2 h-4" />}
           trend={-5.2}
           colorClass="from-red-600 to-red-700"
         />
         <MRSStatCard
-          title="Atrasos (30 dias)"
+          title="Atrasos"
           value={stats.delays}
           icon={<Clock className="w-2 h-4" />}
           trend={-3.1}

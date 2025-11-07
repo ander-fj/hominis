@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { RefreshCw, CheckCircle, XCircle, Clock, Play } from 'lucide-react';
+import { RefreshCw, CheckCircle, XCircle, Clock, Play, User } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 
 interface QueueItem {
@@ -14,6 +14,15 @@ export default function RecalculationStatus() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
+  const [username, setUsername] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Busca o nome de usuário do localStorage quando o componente é montado.
+    const storedUsername = localStorage.getItem('username');
+    if (storedUsername) {
+      setUsername(storedUsername);
+    }
+  }, []);
 
   useEffect(() => {
     loadQueue();
@@ -123,6 +132,12 @@ export default function RecalculationStatus() {
           <RefreshCw className="w-5 h-5 text-[#002b55]" />
           <h3 className="font-semibold text-[#002b55]">Status de Recálculo Automático</h3>
         </div>
+        {username && (
+          <div className="flex items-center gap-2 text-gray-600">
+            <User className="w-4 h-4" />
+            <span className="font-medium">{username}</span>
+          </div>
+        )}
         <div className="flex items-center gap-2">
           {pendingCount > 0 && (
             <>

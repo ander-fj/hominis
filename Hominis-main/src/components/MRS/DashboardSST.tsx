@@ -648,7 +648,7 @@ export default function DashboardSST() {
           colorClass={getExamsColor()}
         />
         <MRSStatCard
-          title="Incidentes (90d)"
+          title="Incidentes"
           value={metrics.incidents.total90Days}
           icon={<AlertTriangle className="w-6 h-6" />}
           colorClass={getIncidentsColor()}

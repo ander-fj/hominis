@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Save, Plus, Trash2, GripVertical, RefreshCw, Link2, Database as DatabaseIcon, FileSpreadsheet, Download, CheckCircle2, Circle, Layers, Table, Upload, AlertTriangle } from 'lucide-react';
+import { Save, Plus, Trash2, GripVertical, RefreshCw, Link2, Database as DatabaseIcon, FileSpreadsheet, Download, CheckCircle2, Circle, Layers, Table, Upload, AlertTriangle, User } from 'lucide-react';
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
 import { CSS } from '../../lib/dndUtils';
@@ -133,6 +133,7 @@ export default function Configuracoes() {
   const [generatingHistory, setGeneratingHistory] = useState(false);
   const [deletingAll, setDeletingAll] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [username, setUsername] = useState<string | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -145,6 +146,12 @@ export default function Configuracoes() {
     loadCriteria();
     loadSheetConfig();
     loadSyncPages();
+
+    // Busca o nome de usuário do localStorage quando o componente é montado.
+    const storedUsername = localStorage.getItem('username');
+    if (storedUsername) {
+      setUsername(storedUsername);
+    }
   }, []);
 
   const loadCriteria = async () => {
@@ -1076,7 +1083,15 @@ Sistema MRS Ranking - Gestão Inteligente de Recursos Humanos e SST
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-[#002b55]">Configurações do Sistema</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold text-[#002b55]">Configurações do Sistema</h1>
+        {username && (
+          <div className="flex items-center gap-2 text-gray-600 bg-gray-100 px-3 py-1.5 rounded-lg">
+            <User className="w-5 h-5 text-gray-500" />
+            <span className="font-medium">{username}</span>
+          </div>
+        )}
+      </div>
 
       <RecalculationStatus />
 
