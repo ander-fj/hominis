@@ -1,0 +1,70 @@
+{
+  "expo": {
+    "name": "Lista de Compras",
+    "slug": "lista-compras",
+    "version": "1.0.0",
+    "orientation": "default",
+    "scheme": "listacompras",
+    "userInterfaceStyle": "automatic",
+    "icon": "./assets/images/icone.png",
+    "splash": {
+      "image": "./assets/images/icone.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "assetBundlePatterns": [
+      "assets/**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.listacompras.app",
+      "icon": "./assets/images/icone.png"
+    },
+    "android": {
+      "package": "com.listacompras.app",
+      "permissions": [
+        "CAMERA",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "icon": "./assets/images/icone.png",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/icone.png",
+        "backgroundColor": "#ffffff"
+      },
+      "versionCode": 1
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "favicon": "./assets/images/icone.png"
+    },
+    "plugins": [
+      [
+        "expo-router",
+        {
+          "origin": false
+        }
+      ],
+      "expo-font",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Permitir que $(PRODUCT_NAME) acesse sua câmera para escanear códigos de barras."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "966b5b38-c260-4eed-9401-34a5ec60fb25"
+      }
+    },
+    "owner": "anderson_jatai"
+  }
+}
