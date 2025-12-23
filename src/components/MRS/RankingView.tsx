@@ -8,18 +8,72 @@ export default function RankingView() {
   const [rankings, setRankings] = useState<RankingResult[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedPeriod, setSelectedPeriod] = useState('2025-10-01');
+  const [viewAllTime, setViewAllTime] = useState(false);
   const [selectedDepartment, setSelectedDepartment] = useState<string>('all');
   const [departments, setDepartments] = useState<string[]>([]);
 
   useEffect(() => {
     loadRankings();
     loadDepartments();
-  }, [selectedPeriod]);
+  }, [selectedPeriod, viewAllTime]);
 
   const loadRankings = async () => {
     setLoading(true);
     try {
-      const results = await calculateRankings(selectedPeriod);
+      let results: RankingResult[] = [];
+
+      if (viewAllTime) {
+        // Buscar dados de todos os meses (ano selecionado e anterior para garantir histórico)
+        const selectedYear = parseInt(selectedPeriod.split('-')[0]);
+        const years = [selectedYear - 1, selectedYear];
+        const promises: Promise<RankingResult[]>[] = [];
+
+        years.forEach((year) => {
+          for (let i = 1; i <= 12; i++) {
+            const month = i.toString().padStart(2, '0');
+            promises.push(calculateRankings(`${year}-${month}-01`));
+          }
+        });
+
+        const monthsResults = await Promise.all(promises);
+        const allResults = monthsResults.flat();
+
+        // Agrupar e somar pontuações
+        const aggregatedData = new Map<string, {
+          employee_name: string;
+          department: string;
+          total_score: number;
+        }>();
+
+        allResults.forEach((r) => {
+          const score = Number(r.total_score) || 0;
+          const existing = aggregatedData.get(r.employee_id);
+
+          if (existing) {
+            existing.total_score += score;
+          } else {
+            aggregatedData.set(r.employee_id, {
+              employee_name: r.employee_name,
+              department: r.department,
+              total_score: score,
+            });
+          }
+        });
+
+        // Converter o mapa agregado de volta para o formato RankingResult[]
+        results = Array.from(aggregatedData.entries()).map(([id, data]) => ({
+          employee_id: id,
+          ...data,
+          rank_position: 0, // Posição será recalculada abaixo
+        }));
+
+        // Reordenar e recalcular posições
+        results.sort((a, b) => b.total_score - a.total_score);
+        results.forEach((r, index) => (r.rank_position = index + 1));
+      } else {
+        results = await calculateRankings(selectedPeriod);
+      }
+
       setRankings(results);
     } catch (error) {
       console.error('Erro ao carregar rankings:', error);
@@ -115,15 +169,29 @@ export default function RankingView() {
       <Card>
         <div className="flex gap-4 mb-6">
           <div className="flex-1">
-            <label className="block text-sm font-medium text-slate-700 mb-2">
-              <Filter className="w-4 h-4 inline mr-1" />
-              Período
-            </label>
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-sm font-medium text-slate-700">
+                <Filter className="w-4 h-4 inline mr-1" />
+                Período
+              </label>
+              <label className="flex items-center gap-2 text-xs cursor-pointer select-none text-slate-600 hover:text-blue-600">
+                <input
+                  type="checkbox"
+                  checked={viewAllTime}
+                  onChange={(e) => setViewAllTime(e.target.checked)}
+                  className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                />
+                Todos os períodos
+              </label>
+            </div>
             <input
               type="month"
               value={selectedPeriod.slice(0, 7)}
               onChange={(e) => setSelectedPeriod(e.target.value + '-01')}
-              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+              disabled={viewAllTime}
+              className={`w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 ${
+                viewAllTime ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : ''
+              }`}
             />
           </div>
           <div className="flex-1">

@@ -7,12 +7,12 @@ import { calculateIntelligentRanking, RankingResult, generatePerformanceData } f
 import { formatNumber } from '@/lib/format';
 import { getMedalEmoji, getMedalColor } from '@/lib/theme';
 import { exportRankingToPDF, exportRankingToXLSX } from '@/lib/exportUtils';
+import { db } from '@/lib/firebase';
 import { useAvailablePeriods } from '@/lib/usePeriods';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
-import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore';
-import { useAuth } from '@/lib/useAuth';
+import { collection, query, where, getDocs } from 'firebase/firestore';
+import { useAuth } from '@/App';
 import { Database } from '@/lib/database.types';
 
 type EvaluationCriteria = Database['public']['Tables']['evaluation_criteria']['Row'];
@@ -219,14 +219,11 @@ export default function RankingInteligente() {
   const loadEmployeeHistory = async (employeeId: string) => {
     try {
       if (!companyId) return;
-      const q = query(collection(db, 'employee_rankings'), 
-        where('companyId', '==', companyId),
-        where('employee_id', '==', employeeId),
-        orderBy('period', 'asc')
-      );
-      const snapshot = await getDocs(q);
-      const historyData = snapshot.docs.map(d => d.data());
-      setEmployeeHistory(historyData as any[]);
+      const rankingsCol = collection(db, 'employee_rankings');
+      const q = query(rankingsCol, where('companyId', '==', companyId), where('employee_id', '==', employeeId));
+      const querySnapshot = await getDocs(q);
+      const data = querySnapshot.docs.map(doc => doc.data()).sort((a: any, b: any) => a.period.localeCompare(b.period));
+      setEmployeeHistory(data as any);
     } catch (error) {
       console.error('Erro ao carregar histórico do colaborador:', error);
       setEmployeeHistory([]);
@@ -236,16 +233,12 @@ export default function RankingInteligente() {
   const loadCriteria = async () => {
     try {
       if (!companyId) return;
-      const q = query(collection(db, 'evaluation_criteria'),
-        where('companyId', '==', companyId),
-        where('active', '==', true),
-        orderBy('display_order', 'asc')
-      );
-      const snapshot = await getDocs(q);
-      const criteriaList = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-      
-      setCriteria(criteriaList as EvaluationCriteria[]);
-      return criteriaList as EvaluationCriteria[];
+      const criteriaCol = collection(db, 'evaluation_criteria');
+      const q = query(criteriaCol, where('companyId', '==', companyId), where('active', '==', true));
+      const querySnapshot = await getDocs(q);
+      const data = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as EvaluationCriteria)).sort((a, b) => (a.display_order || 0) - (b.display_order || 0));
+      setCriteria(data);
+      return data;
     } catch (error) {
       console.error('Erro ao carregar critérios:', error);
       return [];
@@ -264,12 +257,10 @@ export default function RankingInteligente() {
       if (!criteriaData) criteriaData = [];
 
       if (isConsolidated) {
-        const q = query(collection(db, 'employee_scores'),
-          where('employee_id', '==', ranking.employee_id),
-          where('companyId', '==', companyId)
-        );
-        const snapshot = await getDocs(q);
-        const allScores = snapshot.docs.map(d => d.data());
+        // For consolidated view, aggregate all historical data for the employee
+        const allScoresQuery = query(collection(db, 'employee_scores'), where('employee_id', '==', ranking.employee_id), where('companyId', '==', companyId));
+        const allScoresSnapshot = await getDocs(allScoresQuery);
+        const allScores = allScoresSnapshot.docs.map(d => d.data());
 
         const criterionScores = criteriaData.map(criterion => {
           const scoresForCriterion = allScores.filter(s => s.criterion_id === criterion.id);
@@ -296,14 +287,12 @@ export default function RankingInteligente() {
           suggestions: suggestions.length > 0 ? suggestions : ['Manter o bom desempenho atual']
         };
       } else {
-        const q = query(collection(db, 'employee_rankings'),
-          where('companyId', '==', companyId),
-          where('employee_id', '==', ranking.employee_id),
-          where('period', '==', selectedPeriod),
-          limit(1)
-        );
-        const snapshot = await getDocs(q);
-        const rankingData = !snapshot.empty ? snapshot.docs[0].data() : null;
+        // Original logic for single period
+        const rankingsCol = collection(db, 'employee_rankings');
+        const q = query(rankingsCol, where('companyId', '==', companyId), where('employee_id', '==', ranking.employee_id), where('period', '==', selectedPeriod));
+        const querySnapshot = await getDocs(q);
+        const rankingDoc = querySnapshot.docs[0];
+        const rankingData = rankingDoc ? { criterion_details: rankingDoc.data().criterion_details } : null;
 
         const criterionScores = criteriaData.map(criterion => {
           const details = (rankingData?.criterion_details as any) || {};
@@ -333,7 +322,9 @@ export default function RankingInteligente() {
   const loadRankings = async (currentCompanyId: string) => {
     try {
       if (!currentCompanyId) return;
+      console.log('Carregando rankings para período:', selectedPeriod);
       const results = await calculateIntelligentRanking(selectedPeriod, true, currentCompanyId);
+      console.log('Rankings carregados:', results.length);
       setRankings(results);
 
       const depts = [...new Set(results.map(r => r.department))];

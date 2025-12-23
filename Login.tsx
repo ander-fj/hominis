@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { LogIn, AlertCircle, User, Lock } from 'lucide-react';
-import { auth, db } from '@/lib/firebase';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
-import { doc, setDoc, getDoc } from 'firebase/firestore';
+import { auth, db } from '@/lib/firebase';
+import { doc, setDoc } from 'firebase/firestore';
 import { seedSampleData } from '@/lib/rankingEngine';
 
 interface LoginProps {
@@ -22,47 +22,33 @@ export default function Login({ onLoginSuccess }: LoginProps) {
     setError('');
     setLoading(true);
     
-    // Se o usuário não digitou um email, adicionamos um domínio fictício
+    // Se o usuário não digitou um email, adicionamos um domínio fictício para o Firebase aceitar
     const emailToUse = username.includes('@') ? username : `${username}@hominis.app`;
 
     try {
       // Firebase Authentication
       const userCredential = await signInWithEmailAndPassword(auth, emailToUse, password);
-      const user = userCredential.user;
+      
+      // O AuthProvider cuidará da transição de estado.
 
-      // Verificar se o documento do usuário existe no Firestore e criar se necessário
-      const userDocRef = doc(db, 'users', user.uid);
-      const userDoc = await getDoc(userDocRef);
-
-      if (!userDoc.exists()) {
-        const companyId = 'secontaf-default';
-        await setDoc(userDocRef, {
-          email: user.email,
-          companyId: companyId,
-        });
-        await seedSampleData(companyId, true);
-      }
-
-      localStorage.setItem('isAuthenticated', 'true');
-      onLoginSuccess();
     } catch (err: any) {
       console.error('Erro no login:', err);
       
       // Auto-criação para o usuário solicitado 'jatai' se ele não existir
-      if (username === 'jatai' && (err.message === 'Invalid login credentials' || err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential')) {
+      if (username === 'jatai' && (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential')) {
         try {
-          const userCredential = await createUserWithEmailAndPassword(auth, emailToUse, password);
-          const user = userCredential.user;
+          const newUserCredential = await createUserWithEmailAndPassword(auth, emailToUse, password);
+          const user = newUserCredential.user;
 
-          if (user) {
-            const companyId = 'secontaf-default';
-            await setDoc(doc(db, 'users', user.uid), {
-              email: user.email,
-              companyId: companyId,
-            });
+          // Cria um documento para o novo usuário com um companyId padrão
+          const companyId = 'secontaf-default'; // ID da empresa padrão
+          await setDoc(doc(db, 'users', user.uid), {
+            email: user.email,
+            companyId: companyId,
+          });
 
-            await seedSampleData(companyId, true);
-          }
+          // Popula com dados de exemplo, incluindo critérios de avaliação, para o novo usuário.
+          await seedSampleData(companyId, true);
 
           // O AuthProvider cuidará da transição de estado.
           return;
@@ -73,12 +59,10 @@ export default function Login({ onLoginSuccess }: LoginProps) {
 
       if (err.code || err instanceof Error) {
         // Customize error messages for better UX
-        if (err.message === 'Invalid login credentials' || err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+        if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
           setError('Usuário ou senha inválidos.');
-        } else if (err.code === 'auth/invalid-email' || err.message?.includes('valid email')) {
+        } else if (err.code === 'auth/invalid-email') {
           setError('O formato do email é inválido.');
-        } else if (err.message === 'Failed to fetch' || err.name === 'AuthRetryableFetchError') {
-          setError('Erro de conexão. Verifique se o arquivo .env está configurado corretamente e se o projeto Supabase está ativo.');
         } else {
           setError('Erro ao tentar fazer login. Tente novamente.');
         }

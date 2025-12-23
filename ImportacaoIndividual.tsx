@@ -2,10 +2,10 @@ import { useState, useRef } from 'react';
 import { Upload, FileSpreadsheet, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, addDoc, updateDoc, doc, writeBatch, getCountFromServer, setDoc } from 'firebase/firestore';
 import MRSCard from './MRSCard';
 import { calculateIntelligentRanking } from '@/lib/rankingEngine';
-import { useAuth } from '@/lib/useAuth';
+import { collection, getDocs, query, where, doc, updateDoc, addDoc, getCountFromServer, limit, writeBatch } from 'firebase/firestore';
+import { useAuth } from '@/App';
 
 type ImportType = 'colaboradores' | 'avaliacoes' | 'treinamentos' | 'epis' | 'exames' | 'incidentes' | 'ferias';
 
@@ -74,23 +74,25 @@ const deleteSampleEmployees = async (companyId: string | null) => {
   console.log(`Verificando e deletando colaboradores de exemplo para a empresa: ${companyId}`);
 
   try {
-      const q = query(collection(db, 'employees'), where('companyId', '==', companyId));
-      const snapshot = await getDocs(q);
-      const batch = writeBatch(db);
-      let count = 0;
+      const employeesRef = collection(db, 'employees');
+      const q = query(employeesRef, where('companyId', '==', companyId));
+      const querySnapshot = await getDocs(q);
 
-      snapshot.forEach(doc => {
-        const data = doc.data();
-        if (data.email && data.email.endsWith('@empresa.com')) {
-          batch.delete(doc.ref);
-          count++;
-        }
+      const sampleDocsToDelete = querySnapshot.docs.filter(doc => {
+          const email = doc.data().email as string | undefined;
+          // Assumindo que e-mails de exemplo terminam com @empresa.com com base nos templates
+          return email && email.endsWith('@empresa.com');
       });
 
-      if (count > 0) {
+      if (sampleDocsToDelete.length > 0) {
+          const batch = writeBatch(db);
+          sampleDocsToDelete.forEach(doc => {
+              console.log(`Agendando para deletar colaborador de exemplo: ${doc.data().name} (${doc.id})`);
+              batch.delete(doc.ref);
+          });
           await batch.commit();
-          console.log(`${count} colaborador(es) de exemplo foram deletados.`);
-          return count;
+          console.log(`${sampleDocsToDelete.length} colaborador(es) de exemplo foram deletados.`);
+          return sampleDocsToDelete.length;
       } else {
           console.log('Nenhum colaborador de exemplo encontrado para deletar.');
           return 0;
@@ -171,8 +173,8 @@ export default function ImportacaoIndividual() {
       if (type !== 'colaboradores') {
         console.log(`[${type}] Verificando se existem colaboradores...`);
         if (!companyId) throw new Error("ID da empresa não encontrado. Faça login novamente.");
-        
-        const q = query(collection(db, 'employees'), where('companyId', '==', companyId));
+        const employeesCol = collection(db, 'employees');
+        const q = query(employeesCol, where('companyId', '==', companyId));
         const snapshot = await getCountFromServer(q);
         const count = snapshot.data().count;
         
@@ -180,13 +182,15 @@ export default function ImportacaoIndividual() {
           count,
         });
 
-        if (!count || count === 0) {
+        const employees = count > 0 ? [{id: 'exists'}] : [];
+
+        if (!employees || employees.length === 0) {
           console.error(`[${type}] Nenhum colaborador encontrado na base de dados`);
           updateStatus(type, 'error', 'Colaboradores não encontrados. Importe primeiro a planilha de Colaboradores.', 0);
           return;
         }
 
-        console.log(`[${type}] Verificação OK - ${count} colaboradores encontrados`);
+        console.log(`[${type}] Verificação OK - ${count || employees.length} colaboradores encontrados`);
       }
 
       const data = await file.arrayBuffer();
@@ -224,15 +228,12 @@ export default function ImportacaoIndividual() {
               };
 
               const q = query(collection(db, 'employees'), where('email', '==', employeeData.email));
-              const snapshot = await getDocs(q);
-              
-              if (!snapshot.empty) {
-                const docId = snapshot.docs[0].id;
-                await updateDoc(doc(db, 'employees', docId), employeeData);
-              } else {
+              const existing = await getDocs(q);
+              if (existing.empty) {
                 await addDoc(collection(db, 'employees'), employeeData);
+              } else {
+                await updateDoc(doc(db, 'employees', existing.docs[0].id), employeeData);
               }
-
               successCount++;
             } catch (e) {
               errorCount++;
@@ -243,11 +244,11 @@ export default function ImportacaoIndividual() {
         case 'avaliacoes':
           console.log(`Iniciando importação de ${rows.length} avaliações...`);
 
-          const criteriaQ = query(collection(db, 'evaluation_criteria'), where('companyId', '==', companyId));
-          let criteriaSnapshot = await getDocs(criteriaQ);
-          let criteriaData = criteriaSnapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+          const criteriaCol = collection(db, 'evaluation_criteria');
+          let criteriaQuery = query(criteriaCol, where('companyId', '==', companyId));
+          let criteriaSnapshot = await getDocs(criteriaQuery);
 
-          if (!criteriaData || criteriaData.length === 0) {
+          if (criteriaSnapshot.empty) {
             console.log("[avaliacoes] Nenhum critério encontrado, criando critérios padrão...");
             const defaultCriteria = [
               { name: 'Assiduidade', description: 'Presença no trabalho', weight: 30, direction: 'higher_better', data_type: 'percentage', source: 'manual', display_order: 0, active: true, companyId },
@@ -256,20 +257,18 @@ export default function ImportacaoIndividual() {
               { name: 'Qualidade do Trabalho', description: 'Qualidade geral das entregas', weight: 25, direction: 'higher_better', data_type: 'score', source: 'manual', display_order: 3, active: true, companyId },
               { name: 'Trabalho em Equipe', description: 'Colaboração com colegas', weight: 15, direction: 'higher_better', data_type: 'score', source: 'manual', display_order: 4, active: true, companyId },
             ];
-            
             const batch = writeBatch(db);
-            defaultCriteria.forEach(c => {
-              batch.set(doc(collection(db, 'evaluation_criteria')), c);
+            defaultCriteria.forEach(criterion => {
+              const newDocRef = doc(criteriaCol);
+              batch.set(newDocRef, criterion);
             });
             await batch.commit();
-
             console.log("[avaliacoes] Critérios padrão criados.");
             // Recarregar critérios após a criação
-            criteriaSnapshot = await getDocs(criteriaQ);
-            criteriaData = criteriaSnapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+            criteriaSnapshot = await getDocs(criteriaQuery);
           }
 
-          const criteria = criteriaData || [];
+          const criteria = criteriaSnapshot.docs.map(d => ({id: d.id, ...d.data()}));
 
           if (criteria.length === 0) {
             updateStatus(type, 'error', 'ERRO: Falha ao carregar ou criar critérios de avaliação. Tente novamente ou contate o suporte.', 0);
@@ -277,13 +276,12 @@ export default function ImportacaoIndividual() {
           }
 
           // Otimização: Carregar todos os colaboradores em memória para evitar N+1 queries
-          const empQ = query(collection(db, 'employees'), where('companyId', '==', companyId));
-          const empSnap = await getDocs(empQ);
-          
+          const employeesQuery = query(collection(db, 'employees'), where('companyId', '==', companyId));
+          const employeesSnapshot = await getDocs(employeesQuery);
           const employeesMap = new Map<string, any>();
-          empSnap.docs.forEach(doc => {
-            const data = { id: doc.id, ...doc.data() };
-            if (data.email) employeesMap.set(data.email.trim().toLowerCase(), data);
+          employeesSnapshot.docs.forEach(doc => {
+            const data = doc.data();
+            if (data.email) employeesMap.set(data.email.trim().toLowerCase(), { id: doc.id, ...data });
           });
           console.log(`[avaliacoes] Cache de colaboradores criado: ${employeesMap.size} registros`);
 
@@ -365,19 +363,24 @@ export default function ImportacaoIndividual() {
 
               for (const score of scores) {
                 // Firestore upsert logic
-                const q = query(collection(db, 'employee_scores'),
+                const scoreQuery = query(collection(db, 'employee_scores'), 
                   where('employee_id', '==', score.employee_id),
                   where('period', '==', score.period),
                   where('criterion_id', '==', score.criterion_id)
                 );
-                const existingScore = await getDocs(q);
-
+                const existingScore = await getDocs(scoreQuery);
+                let scoreError = null;
                 if (existingScore.empty) {
-                  await addDoc(collection(db, 'employee_scores'), score);
+                  await addDoc(collection(db, 'employee_scores'), score).catch(e => scoreError = e);
                 } else {
-                  await updateDoc(doc(db, 'employee_scores', existingScore.docs[0].id), score);
+                  await updateDoc(doc(db, 'employee_scores', existingScore.docs[0].id), score).catch(e => scoreError = e);
                 }
-                successCount++;
+                if (scoreError) {
+                  console.error('Erro ao inserir score:', scoreError);
+                  errorCount++;
+                } else {
+                  successCount++;
+                }
               }
             } catch (err) {
               console.error('Erro ao processar linha:', err);
@@ -391,9 +394,8 @@ export default function ImportacaoIndividual() {
             const email = row.employee_id ? String(row.employee_id).trim() : (row.email ? String(row.email).trim() : '');
             const q = query(collection(db, 'employees'), where('companyId', '==', companyId), where('email', '==', email));
             const snapshot = await getDocs(q);
+            const employee = snapshot.empty ? null : { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
             
-            const employee = !snapshot.empty ? { id: snapshot.docs[0].id, ...snapshot.docs[0].data() } : null;
-
             if (!employee) {
               errorCount++;
               continue;
@@ -421,9 +423,8 @@ export default function ImportacaoIndividual() {
             const email = row.employee_id ? String(row.employee_id).trim() : (row.email ? String(row.email).trim() : '');
             const q = query(collection(db, 'employees'), where('companyId', '==', companyId), where('email', '==', email));
             const snapshot = await getDocs(q);
+            const employee = snapshot.empty ? null : { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
             
-            const employee = !snapshot.empty ? { id: snapshot.docs[0].id, ...snapshot.docs[0].data() } : null;
-
             if (!employee) {
               errorCount++;
               continue;
@@ -452,9 +453,8 @@ export default function ImportacaoIndividual() {
             const email = row.employee_id ? String(row.employee_id).trim() : (row.email ? String(row.email).trim() : '');
             const q = query(collection(db, 'employees'), where('companyId', '==', companyId), where('email', '==', email));
             const snapshot = await getDocs(q);
+            const employee = snapshot.empty ? null : { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
             
-            const employee = !snapshot.empty ? { id: snapshot.docs[0].id, ...snapshot.docs[0].data() } : null;
-
             if (!employee) {
               errorCount++;
               continue;
@@ -485,9 +485,8 @@ export default function ImportacaoIndividual() {
             const email = row.employee_id ? String(row.employee_id).trim() : (row.email ? String(row.email).trim() : '');
             const q = query(collection(db, 'employees'), where('companyId', '==', companyId), where('email', '==', email));
             const snapshot = await getDocs(q);
+            const employee = snapshot.empty ? null : { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
             
-            const employee = !snapshot.empty ? { id: snapshot.docs[0].id, ...snapshot.docs[0].data() } : null;
-
             console.log('[incidentes] Colaborador encontrado:', employee);
 
             if (!employee || !employee.department) {
@@ -539,9 +538,8 @@ export default function ImportacaoIndividual() {
             const email = row.employee_id ? String(row.employee_id).trim() : (row.email ? String(row.email).trim() : '');
             const q = query(collection(db, 'employees'), where('companyId', '==', companyId), where('email', '==', email));
             const snapshot = await getDocs(q);
+            const employee = snapshot.empty ? null : { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
             
-            const employee = !snapshot.empty ? { id: snapshot.docs[0].id, ...snapshot.docs[0].data() } : null;
-
             if (!employee) {
               console.error('[ferias] Colaborador não encontrado:', row.employee_id);
               errorCount++;

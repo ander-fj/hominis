@@ -4,11 +4,11 @@ import { ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Re
 import MRSCard from './MRSCard';
 import PeriodFilter from './PeriodFilter';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs } from 'firebase/firestore';
 import { calculateDateRange } from '@/lib/dateUtils';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
-import { useAuth } from '@/lib/useAuth';
+import { collection, query, where, getDocs } from 'firebase/firestore';
+import { useAuth } from '@/App';
 
 interface CorrelationData {
   department: string;
@@ -98,9 +98,10 @@ export default function AnaliseIntegrada() {
       const { startDate, endDate } = calculateDateRange(selectedPeriod);
 
       // 1. Fetch all active employees for the company
-      const empQ = query(collection(db, 'employees'), where('companyId', '==', companyId));
-      const empSnap = await getDocs(empQ);
-      const employees = empSnap.docs.map(d => ({ id: d.id, ...d.data() })).filter((e: any) => e.active !== false);
+      const employeesQuery = query(collection(db, 'employees'), where('companyId', '==', companyId));
+      const employeesSnapshot = await getDocs(employeesQuery);
+      const allEmployees = employeesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+      const employees = allEmployees.filter(e => e.active !== false);
 
       if (employees.length === 0) {
         setCorrelationData([]);
@@ -111,28 +112,36 @@ export default function AnaliseIntegrada() {
       const departments = [...new Set(employees.map(e => e.department))];
 
       // 2. Fetch all related data in bulk for the company
-      const fetchForCompany = async (table: string) => {
-        const q = query(collection(db, table), where('companyId', '==', companyId));
-        const snap = await getDocs(q);
-        return snap.docs.map(d => d.data());
+      const fetchForCompany = async (col: string) => {
+        const snap = await getDocs(query(collection(db, col), where('companyId', '==', companyId)));
+        return snap.docs;
       };
 
-      const [scoresData, trainingsData, examsData, incidentsData, criteriaResult] = await Promise.all([
+      const criteriaQuery = query(collection(db, 'evaluation_criteria'), where('companyId', '==', companyId));
+
+      const [scoresDocs, trainingsDocs, examsDocs, incidentsDocs, criteriaSnap] = await Promise.all([
         fetchForCompany('employee_scores'),
         fetchForCompany('sst_trainings'),
         fetchForCompany('sst_medical_exams'),
         fetchForCompany('sst_incidents'),
-        getDocs(query(collection(db, 'evaluation_criteria'), where('companyId', '==', companyId)))
+        getDocs(criteriaQuery)
       ]);
 
-      const criteriaData = criteriaResult.docs.map(d => ({ id: d.id, ...d.data() }));
-      const assiduityCriterion = criteriaData.find((c: any) => c.name === 'Assiduidade');
+      const assiduityCriterion = criteriaSnap.docs.find(doc => doc.data().name === 'Assiduidade');
       const assiduityCriterionId = assiduityCriterion ? assiduityCriterion.id : null;
 
-      const allScores = (scoresData as any[]).filter(d => d.period >= startDate && d.period <= endDate);
-      const allTrainings = (trainingsData as any[]).filter(d => d.completion_date >= startDate && d.completion_date <= endDate);
-      const allExams = (examsData as any[]).filter(d => d.exam_date >= startDate && d.exam_date <= endDate);
-      const allIncidents = (incidentsData as any[]).filter(d => d.incident_date >= startDate && d.incident_date <= endDate);
+      const allScores = scoresDocs
+        .map(d => d.data())
+        .filter(d => d.period >= startDate && d.period <= endDate);
+      const allTrainings = trainingsDocs
+        .map(d => d.data())
+        .filter(d => d.completion_date >= startDate && d.completion_date <= endDate);
+      const allExams = examsDocs
+        .map(d => d.data())
+        .filter(d => d.exam_date >= startDate && d.exam_date <= endDate);
+      const allIncidents = incidentsDocs
+        .map(d => d.data())
+        .filter(d => d.incident_date >= startDate && d.incident_date <= endDate);
 
       // 3. Process data in memory by grouping
       const correlations: CorrelationData[] = departments.map(dept => {

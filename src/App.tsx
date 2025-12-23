@@ -23,6 +23,9 @@ import Configuracoes from './components/MRS/Configuracoes';
 import TabelaDetalhada from './components/MRS/TabelaDetalhada';
 import ImportacaoIndividual from './components/MRS/ImportacaoIndividual';
 import Login from './components/MRS/Login';
+import { db } from '@/lib/firebase';
+import { doc, getDoc, updateDoc, setDoc } from 'firebase/firestore';
+import { useAuth } from '@/lib/useAuth';
 
 type View = 'dashboard-rh' | 'colaboradores' | 'tabela-detalhada' | 'ranking' | 'dashboard-sst' | 'analise' | 'previsoes' | 'configuracoes' | 'importacao';
 
@@ -36,6 +39,7 @@ function App() {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [isEditingSubtitle, setIsEditingSubtitle] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const { user, loading } = useAuth();
 
   useEffect(() => {
     // Verificar se o usuário está autenticado
@@ -44,10 +48,6 @@ function App() {
       setIsAuthenticated(true);
     }
 
-    const savedLogo = localStorage.getItem('customLogo');
-    if (savedLogo) {
-      setLogoUrl(savedLogo);
-    }
     const savedTitle = localStorage.getItem('appTitle');
     if (savedTitle) {
       setAppTitle(savedTitle);
@@ -57,6 +57,28 @@ function App() {
       setAppSubtitle(savedSubtitle);
     }
   }, []);
+
+  useEffect(() => {
+    if (loading) return;
+
+    if (user) {
+      const loadUserLogo = async () => {
+        try {
+          const userDoc = await getDoc(doc(db, 'users', user.uid));
+          if (userDoc.exists() && userDoc.data().logoUrl) {
+            setLogoUrl(userDoc.data().logoUrl);
+          } else {
+            setLogoUrl('/Secontaf1.png');
+          }
+        } catch (error) {
+          console.error('Erro ao carregar logo:', error);
+        }
+      };
+      loadUserLogo();
+    } else {
+      setLogoUrl('/Secontaf1.png');
+    }
+  }, [user, loading]);
 
   const navigation = [
     { id: 'dashboard-rh' as View, label: 'Dashboard RH', icon: LayoutDashboard, color: 'from-blue-600 to-blue-700' },
@@ -141,11 +163,27 @@ function App() {
                         onChange={(e) => {
                           const file = e.target.files?.[0];
                           if (file) {
+                            // Limite reduzido para 750KB para garantir que o base64 caiba no limite de 1MB do Firestore
+                            if (file.size > 750 * 1024) {
+                              alert('A imagem é muito grande (máximo 750KB). Por favor, escolha uma imagem menor para garantir o salvamento.');
+                              return;
+                            }
                             const reader = new FileReader();
-                            reader.onload = (event) => {
+                            reader.onload = async (event) => {
                               if (event.target?.result) {
-                                setLogoUrl(event.target.result as string);
-                                localStorage.setItem('customLogo', event.target.result as string);
+                                const newLogo = event.target.result as string;
+                                setLogoUrl(newLogo);
+                                
+                                if (user) {
+                                  try {
+                                    await setDoc(doc(db, 'users', user.uid), {
+                                      logoUrl: newLogo
+                                    }, { merge: true });
+                                  } catch (error) {
+                                    console.error('Erro ao salvar logo:', error);
+                                    alert('Erro ao salvar o logotipo. Tente novamente.');
+                                  }
+                                }
                               }
                             };
                             reader.readAsDataURL(file);

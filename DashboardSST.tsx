@@ -6,13 +6,13 @@ import MRSStatCard from './MRSStatCard';
 import GoalsEditor from './GoalsEditor';
 import PeriodFilter from './PeriodFilter';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, getCountFromServer } from 'firebase/firestore';
 import { format } from 'date-fns';
 import { calculateDateRange, getPeriodLabel } from '@/lib/dateUtils';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import * as XLSX from 'xlsx';
-import { useAuth } from '@/lib/useAuth';
+import { collection, query, where, getDocs, getCountFromServer } from 'firebase/firestore';
+import { useAuth } from '@/App';
 
 interface SSTMetrics {
   totalEmployees: number;
@@ -88,14 +88,13 @@ export default function DashboardSST() {
   useEffect(() => {
     loadMetrics();
     loadGoals();
-  }, [selectedPeriod, showOnlyActive, companyId]);
+  }, [selectedPeriod, showOnlyActive]);
 
   const loadGoals = async () => {
     if (!companyId) return;
     try {
-      const q = query(collection(db, 'sst_goals'), where('companyId', '==', companyId));
-      const snapshot = await getDocs(q);
-      const data = snapshot.docs.map(doc => doc.data());
+      const goalsSnapshot = await getDocs(query(collection(db, 'sst_goals'), where('companyId', '==', companyId)));
+      const data = goalsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
       const goalsMap: SSTGoals = {
         conformidade: 95,
@@ -123,35 +122,34 @@ export default function DashboardSST() {
     try {
       const { startDate, endDate } = calculateDateRange(selectedPeriod);
 
-      let employeesRef = collection(db, 'employees');
-      let constraints = [where('companyId', '==', companyId)];
+      let employeesColl = collection(db, 'employees');
+      let employeesQuery = query(employeesColl, where('companyId', '==', companyId));
       if (showOnlyActive) {
-        constraints.push(where('active', '==', true));
+        employeesQuery = query(employeesQuery, where('active', '==', true));
       }
-      const employeesQuery = query(employeesRef, ...constraints);
+
       const employeesSnapshot = await getCountFromServer(employeesQuery);
       const employeesResCount = employeesSnapshot.data().count;
+      
+      const activeEmployeesSnapshot = await getDocs(employeesQuery);
+      const activeEmployeeIds = activeEmployeesSnapshot.docs.map(e => e.id) || [];
 
-      const fetchTable = async (table: string) => {
-        const q = query(collection(db, table), where('companyId', '==', companyId));
-        const snap = await getDocs(q);
-        return snap.docs.map(d => d.data());
-      };
+      const trainingsQuery = query(collection(db, 'sst_trainings'), where('companyId', '==', companyId));
+      const episQuery = query(collection(db, 'sst_ppe'), where('companyId', '==', companyId));
+      const examsQuery = query(collection(db, 'sst_medical_exams'), where('companyId', '==', companyId));
+      const incidentsQuery = query(collection(db, 'sst_incidents'), where('companyId', '==', companyId));
 
-      const [trainingsData, episData, examsData, incidentsData] = await Promise.all([
-        fetchTable('sst_trainings'),
-        fetchTable('sst_ppe'),
-        fetchTable('sst_medical_exams'),
-        fetchTable('sst_incidents')
+      const [trainingsRes, episRes, examsRes, incidentsRes] = await Promise.all([
+        getDocs(trainingsQuery), getDocs(episQuery), getDocs(examsQuery), getDocs(incidentsQuery)
       ]);
 
       const now = new Date();
       const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-      let trainings = trainingsData;
-      let epis = episData;
-      let exams = examsData;
-      let incidents = incidentsData;
+      let trainings = trainingsRes.docs.map(d => d.data());
+      let epis = episRes.docs.map(d => d.data());
+      let exams = examsRes.docs.map(d => d.data());
+      let incidents = incidentsRes.docs.map(d => d.data());
 
       if (selectedPeriod !== 'all' && startDate && endDate) {
         trainings = trainings.filter((t: any) => t.completion_date >= startDate && t.completion_date <= endDate);
@@ -335,25 +333,26 @@ export default function DashboardSST() {
       if (!companyId) { alert("ID da empresa não encontrado."); return; }
       const { startDate, endDate } = calculateDateRange(selectedPeriod);
 
-      let employeesRef = collection(db, 'employees');
-      let constraints = [where('companyId', '==', companyId)];
+      let employeesQuery = query(collection(db, 'employees'), where('companyId', '==', companyId));
       if (showOnlyActive) {
-        constraints.push(where('active', '==', true));
+        employeesQuery = query(employeesQuery, where('active', '==', true));
       }
-      const employeesSnapshot = await getDocs(query(employeesRef, ...constraints));
-      const employeesData = employeesSnapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      const employeesSnapshot = await getDocs(employeesQuery);
+      const employeesData = employeesSnapshot.docs.map(doc => ({id: doc.id, ...doc.data()}));
+      const activeEmployeeIds = employeesData.map(e => e.id) || [];
 
-      const fetchTable = async (table: string) => {
-        const q = query(collection(db, table), where('companyId', '==', companyId));
-        const snap = await getDocs(q);
-        return snap.docs.map(d => d.data());
-      };
+      // Firestore doesn't do joins. This would require fetching related employee data separately.
+      // The logic below is simplified.
+      const trainingsQuery = query(collection(db, 'sst_trainings'), where('companyId', '==', companyId));
+      const episQuery = query(collection(db, 'sst_ppe'), where('companyId', '==', companyId));
+      const examsQuery = query(collection(db, 'sst_medical_exams'), where('companyId', '==', companyId));
+      const incidentsQuery = query(collection(db, 'sst_incidents'), where('companyId', '==', companyId));
 
-      const [trainingsData, episData, examsData, incidentsData] = await Promise.all([
-        fetchTable('sst_trainings'),
-        fetchTable('sst_ppe'),
-        fetchTable('sst_medical_exams'),
-        fetchTable('sst_incidents')
+      const [trainingsRes, episRes, examsRes, incidentsRes] = await Promise.all([
+        getDocs(trainingsQuery),
+        getDocs(episQuery),
+        getDocs(examsQuery),
+        getDocs(incidentsQuery)
       ]);
 
       const wb = XLSX.utils.book_new();
@@ -398,10 +397,10 @@ export default function DashboardSST() {
 
       const employeeMap = new Map(employeesData.map(e => [e.id, e]));
 
-      let trainingsList = trainingsData;
-      let episList = episData;
-      let examsList = examsData;
-      let incidentsList = incidentsData;
+      let trainingsList = trainingsRes.docs.map(d => d.data());
+      let episList = episRes.docs.map(d => d.data());
+      let examsList = examsRes.docs.map(d => d.data());
+      let incidentsList = incidentsRes.docs.map(d => d.data());
 
       if (selectedPeriod !== 'all' && startDate && endDate) {
         trainingsList = trainingsList.filter((t: any) => t.completion_date >= startDate && t.completion_date <= endDate);
@@ -410,7 +409,7 @@ export default function DashboardSST() {
         incidentsList = incidentsList.filter((i: any) => i.incident_date >= startDate && i.incident_date <= endDate);
       }
 
-      const trainingsExport = trainingsList.map(t => ({
+      const trainingsData = trainingsList.map(t => ({
         'Colaborador': employeeMap.get(t.employee_id)?.name || 'N/A',
         'Departamento': employeeMap.get(t.employee_id)?.department || 'N/A',
         'Treinamento': t.training_name,
@@ -419,10 +418,10 @@ export default function DashboardSST() {
         'Data Validade': t.expiry_date ? format(new Date(t.expiry_date), 'dd/MM/yyyy') : 'N/A',
         'Status': t.status === 'valid' ? 'Válido' : t.status === 'pending' ? 'Pendente' : 'Expirado'
       }));
-      const wsTrainings = XLSX.utils.json_to_sheet(trainingsExport);
+      const wsTrainings = XLSX.utils.json_to_sheet(trainingsData);
       XLSX.utils.book_append_sheet(wb, wsTrainings, 'Treinamentos');
 
-      const episExport = episList.map(e => ({
+      const episData = episList.map(e => ({
         'Colaborador': employeeMap.get(e.employee_id)?.name || 'N/A',
         'Departamento': employeeMap.get(e.employee_id)?.department || 'N/A',
         'Tipo de EPI': e.ppe_type,
@@ -430,10 +429,10 @@ export default function DashboardSST() {
         'Data Validade': e.expiry_date ? format(new Date(e.expiry_date), 'dd/MM/yyyy') : 'N/A',
         'Status': e.status === 'delivered' ? 'Entregue' : e.status === 'pending' ? 'Pendente' : 'Expirado'
       }));
-      const wsEpis = XLSX.utils.json_to_sheet(episExport);
+      const wsEpis = XLSX.utils.json_to_sheet(episData);
       XLSX.utils.book_append_sheet(wb, wsEpis, 'EPIs');
 
-      const examsExport = examsList.map(e => ({
+      const examsData = examsList.map(e => ({
         'Colaborador': employeeMap.get(e.employee_id)?.name || 'N/A',
         'Departamento': employeeMap.get(e.employee_id)?.department || 'N/A',
         'Tipo de Exame': e.exam_type,
@@ -442,10 +441,10 @@ export default function DashboardSST() {
         'Resultado': e.result,
         'Status': e.status === 'valid' ? 'Válido' : e.status === 'scheduled' ? 'Agendado' : 'Vencido'
       }));
-      const wsExams = XLSX.utils.json_to_sheet(examsExport);
+      const wsExams = XLSX.utils.json_to_sheet(examsData);
       XLSX.utils.book_append_sheet(wb, wsExams, 'Exames Médicos');
 
-      const incidentsExport = incidentsList.map(i => ({
+      const incidentsData = incidentsList.map(i => ({
         'Colaborador': employeeMap.get(i.employee_id)?.name || 'N/A',
         'Departamento': employeeMap.get(i.employee_id)?.department || 'N/A',
         'Data': i.incident_date ? format(new Date(i.incident_date), 'dd/MM/yyyy') : 'N/A',
@@ -454,7 +453,7 @@ export default function DashboardSST() {
         'Dias Perdidos': i.days_lost,
         'Descrição': i.description
       }));
-      const wsIncidents = XLSX.utils.json_to_sheet(incidentsExport);
+      const wsIncidents = XLSX.utils.json_to_sheet(incidentsData);
       XLSX.utils.book_append_sheet(wb, wsIncidents, 'Incidentes');
 
       XLSX.writeFile(wb, `Dashboard-SST-${format(new Date(), 'dd-MM-yyyy')}.xlsx`);
@@ -469,33 +468,38 @@ export default function DashboardSST() {
       if (!companyId) return;
       let data: any[] = [];
       
-      let employeesRef = collection(db, 'employees');
-      let constraints = [where('companyId', '==', companyId)];
+      let employeesQuery = query(collection(db, 'employees'), where('companyId', '==', companyId));
       if (showOnlyActive) {
-        constraints.push(where('active', '==', true));
+        employeesQuery = query(employeesQuery, where('active', '==', true));
       }
-      const employeesSnapshot = await getDocs(query(employeesRef, ...constraints));
-      const employeesMap = new Map(employeesSnapshot.docs.map(d => [d.id, d.data()]));
+      const employeesSnapshot = await getDocs(employeesQuery);
+      const activeEmployeeIds = employeesSnapshot.docs.map(e => e.id) || [];
+      const employeesMap = new Map(employeesSnapshot.docs.map(doc => [doc.id, doc.data()]));
 
       switch (cardType) {
         case 'trainings': {
-          const q = query(collection(db, 'sst_trainings'), 
+          let q = query(collection(db, 'sst_trainings'),
             where('companyId', '==', companyId),
             where('status', 'in', ['pending', 'expired'])
           );
+
           const snapshot = await getDocs(q);
-          data = snapshot.docs.map(d => ({...d.data(), employees: { name: employeesMap.get(d.data().employee_id)?.name } }))
+          data = snapshot.docs.map(doc => ({...doc.data(), employees: { name: employeesMap.get(doc.data().employee_id)?.name } }))
             .sort((a: any, b: any) => new Date(b.completion_date).getTime() - new Date(a.completion_date).getTime())
             .slice(0, 20);
           break;
         }
         case 'epis': {
-          const q = query(collection(db, 'sst_ppe'), 
+          // Firestore doesn't support OR queries on different fields directly.
+          // This would require multiple queries and merging results on the client.
+          // Simplified to just check status for now.
+          let q = query(collection(db, 'sst_ppe'),
             where('companyId', '==', companyId),
-            where('status', 'in', ['pending', 'expired'])
+            where('status', 'in', ['pending', 'expired']),
           );
+
           const snapshot = await getDocs(q);
-          data = snapshot.docs.map(d => ({...d.data(), employees: { name: employeesMap.get(d.data().employee_id)?.name } }))
+          data = snapshot.docs.map(doc => ({...doc.data(), employees: { name: employeesMap.get(doc.data().employee_id)?.name } }))
             .sort((a: any, b: any) => new Date(b.delivery_date).getTime() - new Date(a.delivery_date).getTime())
             .slice(0, 20);
           break;
@@ -503,13 +507,13 @@ export default function DashboardSST() {
         case 'exams': {
           const now = new Date();
           const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-          
+
           const q = query(collection(db, 'sst_medical_exams'), where('companyId', '==', companyId));
-          const snapshot = await getDocs(q);
+          const examsSnapshot = await getDocs(q);
           
-          data = snapshot.docs.map(d => ({...d.data(), employees: { name: employeesMap.get(d.data().employee_id)?.name } }))
+          data = examsSnapshot.docs.map(d => ({...d.data(), employees: { name: employeesMap.get(d.data().employee_id)?.name } }))
             .sort((a: any, b: any) => new Date(b.exam_date).getTime() - new Date(a.exam_date).getTime())
-            .filter((e: any) => {
+            .filter(e => {
             if (e.status === 'expired') return true;
             if (!e.next_exam_date) return false;
             const nextDate = new Date(e.next_exam_date);
@@ -520,14 +524,15 @@ export default function DashboardSST() {
         case 'incidents': {
           const ninetyDaysAgo = new Date();
           ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
-          const ninetyDaysAgoStr = ninetyDaysAgo.toISOString().split('T')[0];
 
-          const q = query(collection(db, 'sst_incidents'), 
-            where('companyId', '==', companyId),
-            where('incident_date', '>=', ninetyDaysAgoStr)
+          let q = query(collection(db, 'sst_incidents'),
+            where('companyId', '==', companyId)
           );
+
           const snapshot = await getDocs(q);
-          data = snapshot.docs.map(d => ({...d.data(), employees: { name: employeesMap.get(d.data().employee_id)?.name } }))
+          const ninetyDaysAgoStr = ninetyDaysAgo.toISOString().split('T')[0];
+          data = snapshot.docs.map(doc => ({...doc.data(), employees: { name: employeesMap.get(doc.data().employee_id)?.name } }))
+            .filter((i: any) => i.incident_date >= ninetyDaysAgoStr)
             .sort((a: any, b: any) => new Date(b.incident_date).getTime() - new Date(a.incident_date).getTime());
           break;
         }
