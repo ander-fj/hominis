@@ -11,7 +11,7 @@ Sistema completo e inteligente de gestão de recursos humanos e segurança do tr
 - **Recálculo automático** ao modificar critérios ou pesos
 - **Visualizações interativas** com gráficos e rankings
 
-### 📊 Dashboard RH
+### 📊 Dashboard RH   
 - Indicadores de assiduidade, pontualidade e horas trabalhadas
 - Distribuição por departamento
 - Estatísticas consolidadas
