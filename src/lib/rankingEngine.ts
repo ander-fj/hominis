@@ -68,7 +68,9 @@ export async function calculateIntelligentRanking(period: string, useCache: bool
     const scoresQuery = query(scoresRef, ...scoresConstraints);
 
     let criteriaRef = collection(db, 'evaluation_criteria');
-    let criteriaConstraints = [where('active', '==', true), orderBy('display_order')];
+    // Removido orderBy('display_order') para evitar erro de índice composto no Firestore.
+    // A ordenação será feita em memória.
+    let criteriaConstraints = [where('active', '==', true)];
     if (companyId) criteriaConstraints.push(where('companyId', '==', companyId));
     const criteriaQuery = query(criteriaRef, ...criteriaConstraints);
 
@@ -86,7 +88,9 @@ export async function calculateIntelligentRanking(period: string, useCache: bool
       prevRankingQuery ? getDocs(prevRankingQuery) : Promise.resolve({ docs: [] }),
     ]);
 
-    const criteria = criteriaResult.docs.map(d => ({ id: d.id, ...d.data() })) as EvaluationCriteria[];
+    const criteria = criteriaResult.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .sort((a: any, b: any) => (a.display_order || 0) - (b.display_order || 0)) as EvaluationCriteria[];
     let scores = scoresResult.docs.map(d => ({ id: d.id, ...d.data() })) as EmployeeScore[];
     const employees = employeesResult.docs.map(d => ({ id: d.id, ...d.data() })) as Employee[];
     const previousRankings = previousRankingsResult.docs.map(d => d.data()) as any[];

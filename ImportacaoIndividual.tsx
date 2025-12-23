@@ -27,7 +27,7 @@ const IMPORT_CONFIGS = {
   avaliacoes: {
     title: 'Avaliações',
     description: 'Avaliações de desempenho',
-    sheetName: 'Avaliacoes',
+    sheetName: 'Avaliações',
     icon: '📊',
     columns: ['employee_id', 'periodo', 'horas_trabalhadas', 'faltas_injustificadas', 'atrasos']
   },

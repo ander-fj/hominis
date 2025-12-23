@@ -7,7 +7,6 @@ import { calculateIntelligentRanking, RankingResult, generatePerformanceData } f
 import { formatNumber } from '@/lib/format';
 import { getMedalEmoji, getMedalColor } from '@/lib/theme';
 import { exportRankingToPDF, exportRankingToXLSX } from '@/lib/exportUtils';
-import { useAvailablePeriods } from '@/lib/usePeriods';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import { db } from '@/lib/firebase';
@@ -35,8 +34,8 @@ export default function RankingInteligente() {
   }>>([]);
   const { companyId } = useAuth();
 
-  const { periods: availablePeriods } = useAvailablePeriods();
-
+  const [availablePeriods, setAvailablePeriods] = useState<{value: string, label: string}[]>([]);
+  
   const formatPeriodLabel = (periodValue: string): string => {
     if (!periodValue || !periodValue.includes('-')) {
       return periodValue;
@@ -52,6 +51,39 @@ export default function RankingInteligente() {
     // Capitalize first letter
     return formatted.charAt(0).toUpperCase() + formatted.slice(1);
   };
+
+  useEffect(() => {
+    const loadPeriods = async () => {
+      if (!companyId) return;
+      try {
+        // Busca períodos existentes nos scores
+        const q = query(collection(db, 'employee_scores'), where('companyId', '==', companyId));
+        const snapshot = await getDocs(q);
+        const periods = new Set<string>();
+        
+        snapshot.forEach(doc => {
+          const data = doc.data();
+          if (data.period) periods.add(data.period);
+        });
+
+        // Adiciona meses recentes se não existirem dados ainda (para novos usuários)
+        const today = new Date();
+        for (let i = 0; i < 3; i++) {
+          const d = new Date(today.getFullYear(), today.getMonth() - i, 1);
+          periods.add(d.toISOString().slice(0, 7) + '-01');
+        }
+
+        const sortedPeriods = Array.from(periods).sort().reverse().map(p => ({
+          value: p,
+          label: formatPeriodLabel(p)
+        }));
+        setAvailablePeriods(sortedPeriods);
+      } catch (error) {
+        console.error('Erro ao carregar períodos:', error);
+      }
+    };
+    loadPeriods();
+  }, [companyId]);
 
   useEffect(() => {
     let isMounted = true;
@@ -239,10 +271,11 @@ export default function RankingInteligente() {
       const q = query(collection(db, 'evaluation_criteria'),
         where('companyId', '==', companyId),
         where('active', '==', true),
-        orderBy('display_order', 'asc')
+        // orderBy('display_order', 'asc') // Removido para evitar erro de índice
       );
       const snapshot = await getDocs(q);
-      const criteriaList = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      const criteriaList = snapshot.docs.map(d => ({ id: d.id, ...d.data() }))
+        .sort((a: any, b: any) => (a.display_order || 0) - (b.display_order || 0));
       
       setCriteria(criteriaList as EvaluationCriteria[]);
       return criteriaList as EvaluationCriteria[];

@@ -7,7 +7,7 @@ import GoalsEditor from './GoalsEditor';
 import PeriodFilter from './PeriodFilter';
 import { db } from '@/lib/firebase';
 import { collection, query, where, getDocs, getCountFromServer } from 'firebase/firestore';
-import { format } from 'date-fns';
+import { format, subMonths, startOfMonth, endOfMonth } from 'date-fns';
 import { calculateDateRange, getPeriodLabel } from '@/lib/dateUtils';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
@@ -83,11 +83,25 @@ export default function DashboardSST() {
     exams: [],
     incidents: []
   });
+  const [chartData, setChartData] = useState<{
+    conformity: any[];
+    incidents: any[];
+    trainings: any[];
+    epis: any[];
+  }>({
+    conformity: [],
+    incidents: [],
+    trainings: [],
+    epis: [],
+  });
   const [showOnlyActive, setShowOnlyActive] = useState(true);
 
   useEffect(() => {
-    loadMetrics();
-    loadGoals();
+    if (companyId) {
+      loadMetrics();
+      loadGoals();
+      loadChartData();
+    }
   }, [selectedPeriod, showOnlyActive, companyId]);
 
   const loadGoals = async () => {
@@ -206,6 +220,95 @@ export default function DashboardSST() {
       console.error('Erro ao carregar métricas:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadChartData = async () => {
+    if (!companyId) return;
+
+    try {
+      const now = new Date();
+      const months = Array.from({ length: 6 }, (_, i) => {
+        const d = subMonths(now, 5 - i);
+        return {
+          start: startOfMonth(d),
+          end: endOfMonth(d),
+          label: format(d, 'MMM'),
+        };
+      });
+
+      const fetchTable = async (table: string) => {
+        const q = query(collection(db, table), where('companyId', '==', companyId));
+        const snap = await getDocs(q);
+        return snap.docs.map(d => d.data());
+      };
+
+      const [allTrainings, allEpis, allExams, allIncidents, employeesSnapshot] = await Promise.all([
+        fetchTable('sst_trainings'),
+        fetchTable('sst_ppe'),
+        fetchTable('sst_medical_exams'),
+        fetchTable('sst_incidents'),
+        getDocs(query(collection(db, 'employees'), where('companyId', '==', companyId), where('active', '==', true)))
+      ]);
+      const totalEmployees = employeesSnapshot.size;
+
+      const toDate = (date: any): Date | null => {
+        if (!date) return null;
+        if (date.toDate) return date.toDate();
+        const d = new Date(date);
+        return isNaN(d.getTime()) ? null : d;
+      };
+
+      const monthlyMetrics = months.map(month => {
+        // Conformity Rate
+        const upToDateExamsInMonth = allExams.filter((e: any) => {
+          const examDate = toDate(e.exam_date);
+          const nextExamDate = toDate(e.next_exam_date);
+          return examDate && nextExamDate && examDate <= month.end && nextExamDate > month.end;
+        }).length;
+        const conformityRateMonth = totalEmployees > 0 ? (upToDateExamsInMonth / totalEmployees) * 100 : 0;
+
+        // Incidents
+        const monthIncidents = allIncidents.filter((i: any) => {
+          const incidentDate = toDate(i.incident_date);
+          return incidentDate && incidentDate >= month.start && incidentDate <= month.end;
+        });
+        const accidentsMonth = monthIncidents.filter(i => i.incident_type === 'Acidente').length;
+        const nearMissesMonth = monthIncidents.filter(i => i.incident_type === 'Quase-Acidente').length;
+
+        // Training Completion Rate
+        const monthTrainings = allTrainings.filter((t: any) => {
+          const completionDate = toDate(t.completion_date);
+          return completionDate && completionDate >= month.start && completionDate <= month.end;
+        });
+        const trainingsCompletedMonth = monthTrainings.filter(t => t.status === 'valid').length;
+        const trainingRateMonth = monthTrainings.length > 0 ? (trainingsCompletedMonth / monthTrainings.length) * 100 : 0;
+
+        // EPIs in Good Condition
+        const monthEpis = allEpis.filter((e: any) => {
+          const deliveryDate = toDate(e.delivery_date);
+          return deliveryDate && deliveryDate >= month.start && deliveryDate <= month.end;
+        });
+        const episDeliveredMonth = monthEpis.filter(e => e.status === 'delivered').length;
+        const epiRateMonth = monthEpis.length > 0 ? (episDeliveredMonth / monthEpis.length) * 100 : 0;
+
+        return {
+          mes: month.label,
+          conformity: parseFloat(conformityRateMonth.toFixed(1)),
+          incidents: { acidentes: accidentsMonth, quaseAcidentes: nearMissesMonth },
+          trainings: parseFloat(trainingRateMonth.toFixed(1)),
+          epis: parseFloat(epiRateMonth.toFixed(1)),
+        };
+      });
+
+      setChartData({
+        conformity: monthlyMetrics.map(m => ({ mes: m.mes, taxa: m.conformity, meta: goals.conformidade })),
+        incidents: monthlyMetrics.map(m => ({ mes: m.mes, acidentes: m.incidents.acidentes, quaseAcidentes: m.incidents.quaseAcidentes, meta: goals.incidentes })),
+        trainings: monthlyMetrics.map(m => ({ mes: m.mes, taxa: m.trainings, meta: goals.treinamentos })),
+        epis: monthlyMetrics.map(m => ({ mes: m.mes, taxa: m.epis, meta: goals.epis })),
+      });
+    } catch (error) {
+      console.error('Erro ao carregar dados dos gráficos:', error);
     }
   };
 
@@ -1024,14 +1127,9 @@ export default function DashboardSST() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <MRSCard title="Evolução da Taxa de Conformidade" icon={Target}>
+          {chartData.conformity.length > 0 ? (
           <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={[
-              { mes: 'Jun', taxa: 88, meta: goals.conformidade },
-              { mes: 'Jul', taxa: 91, meta: goals.conformidade },
-              { mes: 'Ago', taxa: 89, meta: goals.conformidade },
-              { mes: 'Set', taxa: 93, meta: goals.conformidade },
-              { mes: 'Out', taxa: parseFloat(conformityRate), meta: goals.conformidade }
-            ]}>
+            <LineChart data={chartData.conformity.map(d => ({ ...d, meta: goals.conformidade }))}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
               <XAxis dataKey="mes" stroke="#6b7280" />
               <YAxis domain={[0, 100]} tickFormatter={(value) => `${value}%`} />
@@ -1054,6 +1152,11 @@ export default function DashboardSST() {
               </Line>
             </LineChart>
           </ResponsiveContainer>
+          ) : (
+            <div className="h-72 flex items-center justify-center text-gray-500">
+              Sem dados históricos para exibir o gráfico.
+            </div>
+          )}
           <div className="mt-4 flex items-center justify-between p-3 bg-gray-50 rounded-lg">
             <div className="flex items-center gap-2">
               <Target className="w-5 h-5 text-blue-600" />
@@ -1080,14 +1183,9 @@ export default function DashboardSST() {
         </MRSCard>
 
         <MRSCard title="Incidentes por Mês" icon={AlertTriangle}>
+          {chartData.incidents.length > 0 ? (
           <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={[
-              { mes: 'Jun', acidentes: 4, quaseAcidentes: 8, meta: goals.incidentes },
-              { mes: 'Jul', acidentes: 3, quaseAcidentes: 6, meta: goals.incidentes },
-              { mes: 'Ago', acidentes: 2, quaseAcidentes: 5, meta: goals.incidentes },
-              { mes: 'Set', acidentes: 1, quaseAcidentes: 4, meta: goals.incidentes },
-              { mes: 'Out', acidentes: metrics.incidents.accidents, quaseAcidentes: metrics.incidents.nearMisses, meta: goals.incidentes }
-            ]}>
+            <BarChart data={chartData.incidents.map(d => ({ ...d, meta: goals.incidentes }))}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
               <XAxis dataKey="mes" stroke="#6b7280" />
               <YAxis allowDecimals={false} />
@@ -1104,6 +1202,11 @@ export default function DashboardSST() {
               </Bar>
             </BarChart>
           </ResponsiveContainer>
+          ) : (
+            <div className="h-72 flex items-center justify-center text-gray-500">
+              Sem dados históricos para exibir o gráfico.
+            </div>
+          )}
           <div className="mt-4 flex items-center justify-between p-3 bg-gray-50 rounded-lg">
             <div className="flex items-center gap-2">
               <Target className="w-5 h-5 text-blue-600" />
@@ -1132,14 +1235,9 @@ export default function DashboardSST() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <MRSCard title="Taxa de Conclusão de Treinamentos" icon={BookOpen}>
+          {chartData.trainings.length > 0 ? (
           <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={[
-              { mes: 'Jun', taxa: 82, meta: goals.treinamentos },
-              { mes: 'Jul', taxa: 85, meta: goals.treinamentos },
-              { mes: 'Ago', taxa: 88, meta: goals.treinamentos },
-              { mes: 'Set', taxa: 92, meta: goals.treinamentos },
-              { mes: 'Out', taxa: metrics.trainings.total > 0 ? (metrics.trainings.completed / metrics.trainings.total) * 100 : 0, meta: goals.treinamentos }
-            ]}>
+            <LineChart data={chartData.trainings.map(d => ({ ...d, meta: goals.treinamentos }))}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
               <XAxis dataKey="mes" stroke="#6b7280" />
               <YAxis domain={[0, 100]} tickFormatter={(value) => `${value}%`} />
@@ -1152,19 +1250,11 @@ export default function DashboardSST() {
               <Line
                 type="monotone"
                 dataKey="taxa"
-                stroke={getBarColorForValue(
-                  metrics.trainings.total > 0 ? (metrics.trainings.completed / metrics.trainings.total) * 100 : 0,
-                  goals.treinamentos,
-                  true
-                )}
+                stroke="#f59e0b"
                 strokeWidth={3}
                 name="Taxa de Conclusão"
                 dot={{
-                  fill: getBarColorForValue(
-                    metrics.trainings.total > 0 ? (metrics.trainings.completed / metrics.trainings.total) * 100 : 0,
-                    goals.treinamentos,
-                    true
-                  ),
+                  fill: '#f59e0b',
                   r: 5
                 }}
                 activeDot={{ r: 7 }}
@@ -1173,6 +1263,11 @@ export default function DashboardSST() {
               </Line>
             </LineChart>
           </ResponsiveContainer>
+          ) : (
+            <div className="h-72 flex items-center justify-center text-gray-500">
+              Sem dados históricos para exibir o gráfico.
+            </div>
+          )}
           <div className="mt-4 flex items-center justify-between p-3 bg-gray-50 rounded-lg">
             <div className="flex items-center gap-2">
               <Target className="w-5 h-5 text-blue-600" />
@@ -1202,14 +1297,9 @@ export default function DashboardSST() {
         </MRSCard>
 
         <MRSCard title="EPIs em Boas Condições (%)" icon={HardHat}>
+          {chartData.epis.length > 0 ? (
           <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={[
-              { mes: 'Jun', taxa: 92, meta: goals.epis },
-              { mes: 'Jul', taxa: 94, meta: goals.epis },
-              { mes: 'Ago', taxa: 96, meta: goals.epis },
-              { mes: 'Set', taxa: 97, meta: goals.epis },
-              { mes: 'Out', taxa: metrics.epis.total > 0 ? (metrics.epis.delivered / metrics.epis.total) * 100 : 0, meta: goals.epis }
-            ]}>
+            <LineChart data={chartData.epis.map(d => ({ ...d, meta: goals.epis }))}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
               <XAxis dataKey="mes" stroke="#6b7280" />
               <YAxis domain={[0, 100]} tickFormatter={(value) => `${value}%`} />
@@ -1222,19 +1312,11 @@ export default function DashboardSST() {
               <Line
                 type="monotone"
                 dataKey="taxa"
-                stroke={getBarColorForValue(
-                  metrics.epis.total > 0 ? (metrics.epis.delivered / metrics.epis.total) * 100 : 0,
-                  goals.epis,
-                  true
-                )}
+                stroke="#10b981"
                 strokeWidth={3}
                 name="Taxa OK"
                 dot={{
-                  fill: getBarColorForValue(
-                    metrics.epis.total > 0 ? (metrics.epis.delivered / metrics.epis.total) * 100 : 0,
-                    goals.epis,
-                    true
-                  ),
+                  fill: '#10b981',
                   r: 5
                 }}
                 activeDot={{ r: 7 }}
@@ -1243,6 +1325,11 @@ export default function DashboardSST() {
               </Line>
             </LineChart>
           </ResponsiveContainer>
+          ) : (
+            <div className="h-72 flex items-center justify-center text-gray-500">
+              Sem dados históricos para exibir o gráfico.
+            </div>
+          )}
           <div className="mt-4 flex items-center justify-between p-3 bg-gray-50 rounded-lg">
             <div className="flex items-center gap-2">
               <Target className="w-5 h-5 text-blue-600" />
