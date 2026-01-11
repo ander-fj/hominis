@@ -3,8 +3,9 @@ import { BarChart3, TrendingUp, AlertTriangle, Users, Heart, Activity, Target, D
 import { ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, LineChart, Line, LabelList } from 'recharts';
 import MRSCard from './MRSCard';
 import PeriodFilter from './PeriodFilter';
-import { supabase } from '../../lib/supabase';
 import { calculateDateRange } from '../../lib/dateUtils';
+import { collection, getDocs, query, where, orderBy } from 'firebase/firestore';
+import { db } from '../../lib/firebase';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 
@@ -21,10 +22,25 @@ export default function AnaliseIntegrada() {
   const [correlationData, setCorrelationData] = useState<CorrelationData[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedPeriod, setSelectedPeriod] = useState('30');
+  const [availablePeriods, setAvailablePeriods] = useState<{ value: string; label: string }[]>([]);
 
   useEffect(() => {
     loadCorrelationData();
   }, [selectedPeriod]);
+
+  useEffect(() => {
+    const fetchPeriods = async () => {
+      const periodsQuery = query(collection(db, 'employee_rankings'), orderBy('period', 'desc'));
+      const periodsSnapshot = await getDocs(periodsQuery);
+      const periods = [...new Set(periodsSnapshot.docs.map(doc => doc.data().period as string))].filter(p => p !== 'consolidated');
+      const periodOptions = periods.map(p => ({
+        value: p,
+        label: new Date(p + 'T00:00:00').toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
+      }));
+      setAvailablePeriods(periodOptions);
+    };
+    fetchPeriods();
+  }, []);
 
   const handleExportPDF = async () => {
     try {
@@ -75,94 +91,74 @@ export default function AnaliseIntegrada() {
   const loadCorrelationData = async () => {
     setLoading(true);
     try {
-      const { data: employees } = await supabase
-        .from('employees')
-        .select('id, name, department')
-        .eq('active', true);
+      const { startDate, endDate } = calculateDateRange(selectedPeriod);
 
-      if (!employees) return;
+      // 1. Fetch all necessary data in parallel
+      const [
+        employeesSnapshot,
+        scoresSnapshot,
+        trainingsSnapshot,
+        examsSnapshot,
+        incidentsSnapshot,
+        criteriaSnapshot
+      ] = await Promise.all([
+        getDocs(query(collection(db, 'employees'), where('active', '==', true))),
+        getDocs(query(collection(db, 'employee_scores'), where('period', '>=', startDate), where('period', '<=', endDate))),
+        getDocs(query(collection(db, 'sst_trainings'), where('completion_date', '>=', startDate), where('completion_date', '<=', endDate))),
+        getDocs(query(collection(db, 'sst_medical_exams'), where('exam_date', '>=', startDate), where('exam_date', '<=', endDate))),
+        getDocs(query(collection(db, 'sst_incidents'), where('incident_date', '>=', startDate), where('incident_date', '<=', endDate))),
+        getDocs(collection(db, 'evaluation_criteria'))
+      ]);
 
+      const employees = employeesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const scores = scoresSnapshot.docs.map(doc => doc.data());
+      const trainings = trainingsSnapshot.docs.map(doc => doc.data()).filter((t: any) => t.status === 'valid');
+      const exams = examsSnapshot.docs.map(doc => doc.data()).filter((e: any) => e.status === 'valid');
+      const incidents = incidentsSnapshot.docs.map(doc => doc.data());
+      const criteriaMap = new Map(criteriaSnapshot.docs.map(doc => [doc.id, doc.data()]));
+      const assiduityCriterionId = [...criteriaMap.entries()].find(([, crit]) => crit.name === 'Assiduidade')?.[0];
+
+      // 2. Group data by department
       const departments = [...new Set(employees.map(e => e.department))];
-      const correlations: CorrelationData[] = [];
-
-      for (const dept of departments) {
+      const correlationResults: CorrelationData[] = departments.map(dept => {
         const deptEmployees = employees.filter(e => e.department === dept);
+        const deptEmployeeIds = deptEmployees.map(e => e.id);
 
-        let totalAbsences = 0;
-        let totalTrainings = 0;
-        let totalExamsValid = 0;
-        let totalScores = 0;
+        // Calculate Absences
+        const deptAssiduityScores = scores.filter(s => deptEmployeeIds.includes(s.employee_id) && s.criterion_id === assiduityCriterionId);
+        const totalAbsences = deptAssiduityScores.reduce((sum, score) => {
+          const assiduity = parseFloat(score.raw_value);
+          return sum + (isNaN(assiduity) ? 0 : Math.round((100 - assiduity) / 5));
+        }, 0);
 
-        const { startDate, endDate } = calculateDateRange(selectedPeriod);
+        // Count Trainings
+        const totalTrainings = trainings.filter(t => deptEmployeeIds.includes(t.employee_id)).length;
 
-        for (const emp of deptEmployees) {
-          // Buscar scores de assiduidade no período
-          const { data: assiduityScores } = await supabase
-            .from('employee_scores')
-            .select('raw_value, evaluation_criteria(name)')
-            .eq('employee_id', emp.id)
-            .gte('period', startDate)
-            .lte('period', endDate);
+        // Count Valid Exams
+        const totalExamsValid = exams.filter(e => deptEmployeeIds.includes(e.employee_id)).length;
 
-          const relevantScores = assiduityScores?.filter(s => s.evaluation_criteria?.name === 'Assiduidade') || [];
-          relevantScores.forEach(score => {
-            const assiduity = parseFloat(score.raw_value);
-            if (!isNaN(assiduity)) {
-              totalAbsences += Math.round((100 - assiduity) / 5);
-            }
-          });
+        // Count Incidents
+        const totalIncidents = incidents.filter(i => {
+          const employee = employees.find(e => e.id === i.employee_id);
+          return employee && employee.department === dept;
+        }).length;
 
-          const { count: trainingsCount } = await supabase
-            .from('sst_trainings')
-            .select('*', { count: 'exact', head: true })
-            .eq('employee_id', emp.id)
-            .eq('status', 'valid')
-            .gte('completion_date', startDate)
-            .lte('completion_date', endDate);
+        // Calculate Average Score
+        const deptScores = scores.filter(s => deptEmployeeIds.includes(s.employee_id) && s.normalized_score != null);
+        const totalScoreSum = deptScores.reduce((sum, s) => sum + Number(s.normalized_score), 0);
+        const avgScore = deptScores.length > 0 ? totalScoreSum / deptScores.length : 0;
 
-          totalTrainings += trainingsCount || 0;
-
-          const { count: examsCount } = await supabase
-            .from('sst_medical_exams')
-            .select('*', { count: 'exact', head: true })
-            .eq('employee_id', emp.id)
-            .eq('status', 'valid')
-            .gte('exam_date', startDate)
-            .lte('exam_date', endDate);
-
-          totalExamsValid += examsCount || 0;
-
-          const { data: scores } = await supabase
-            .from('employee_scores')
-            .select('normalized_score')
-            .eq('employee_id', emp.id)
-            .gte('period', startDate)
-            .lte('period', endDate);
-
-          if (scores && scores.length > 0) {
-            const avgScore = scores.reduce((sum, s) => sum + Number(s.normalized_score), 0) / scores.length;
-            totalScores += avgScore;
-          }
-        }
-
-        const { data: incidents } = await supabase
-          .from('sst_incidents')
-          .select('id')
-          .eq('department', dept)
-          .gte('incident_date', startDate)
-          .lte('incident_date', endDate);
-
-        correlations.push({
+        return {
           department: dept,
           absences: totalAbsences,
           trainings: totalTrainings,
           exams_valid: totalExamsValid,
-          incidents: incidents?.length || 0,
-          avg_score: deptEmployees.length > 0 ? totalScores / deptEmployees.length : 0,
-        });
-      }
+          incidents: totalIncidents,
+          avg_score: avgScore,
+        };
+      });
 
-      setCorrelationData(correlations);
+      setCorrelationData(correlationResults);
     } catch (error) {
       console.error('Erro ao carregar correlações:', error);
     } finally {
@@ -232,6 +228,8 @@ export default function AnaliseIntegrada() {
           <PeriodFilter
             selectedPeriod={selectedPeriod}
             onPeriodChange={setSelectedPeriod}
+            periods={availablePeriods}
+            loading={loading}
           />
           <button
             onClick={handleExportPDF}

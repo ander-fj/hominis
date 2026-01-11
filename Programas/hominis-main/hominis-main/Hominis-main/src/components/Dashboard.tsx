@@ -2,7 +2,9 @@ import { useState, useEffect } from 'react';
 import { Users, UserX, Clock, Calendar, TrendingUp, ChevronDown, ChevronUp, Briefcase } from 'lucide-react';
 import Card from './Card';
 import StatCard from './StatCard';
-import { supabase } from '../lib/supabase';
+import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { db } from '../lib/firebase';
+import { UserMetricsModal } from './UserMetricsModal';
 
 interface DashboardStats {
   totalEmployees: number;
@@ -24,32 +26,45 @@ export default function Dashboard() {
   });
   const [rhExpanded, setRhExpanded] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [isMetricsModalOpen, setIsMetricsModalOpen] = useState(false);
+  const [employeesData, setEmployeesData] = useState<any[]>([]);
+  const [attendanceData, setAttendanceData] = useState<any[]>([]);
 
   useEffect(() => {
-    loadDashboardData();
+    setLoading(true);
+
+    // Listener para Colaboradores
+    const unsubEmployees = onSnapshot(collection(db, 'employees'), (snapshot) => {
+      setEmployeesData(snapshot.docs.map(doc => doc.data()));
+    });
+
+    // Listener para Presença (Últimos 30 dias)
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const attendanceQuery = query(
+      collection(db, 'attendance_records'),
+      where('date', '>=', thirtyDaysAgo)
+    );
+    const unsubAttendance = onSnapshot(attendanceQuery, (snapshot) => {
+      setAttendanceData(snapshot.docs.map(doc => doc.data()));
+    });
+
+    return () => {
+      unsubEmployees();
+      unsubAttendance();
+    };
   }, []);
 
-  const loadDashboardData = async () => {
-    setLoading(true);
-    try {
-      const { data: employees } = await supabase
-        .from('employees')
-        .select('*');
+  useEffect(() => {
+    if (employeesData.length > 0 || attendanceData.length > 0) {
+      const totalEmployees = employeesData.length;
+      const activeEmployees = employeesData.filter((e: any) => e.active).length;
+      const departments = new Set(employeesData.map((e: any) => e.department));
 
-      const { data: attendance } = await supabase
-        .from('attendance_records')
-        .select('*')
-        .gte('date', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]);
-
-      const totalEmployees = employees?.length || 0;
-      const activeEmployees = employees?.filter(e => e.active).length || 0;
-      const departments = new Set(employees?.map(e => e.department));
-
-      const absences = attendance?.filter(a => a.status === 'absent').length || 0;
-      const delays = attendance?.filter(a => a.status === 'late').length || 0;
-      const totalHours = attendance?.reduce((sum, a) => sum + a.hours_worked, 0) || 0;
-      const averageHours = attendance && attendance.length > 0 ? totalHours / attendance.length : 0;
-
+      const absences = attendanceData.filter((a: any) => a.status === 'absent').length;
+      const delays = attendanceData.filter((a: any) => a.status === 'late').length;
+      const totalHours = attendanceData.reduce((sum: number, a: any) => sum + (a.hours_worked || 0), 0);
+      const averageHours = attendanceData.length > 0 ? totalHours / attendanceData.length : 0;
+      
       setStats({
         totalEmployees,
         absences,
@@ -58,12 +73,9 @@ export default function Dashboard() {
         activeEmployees,
         departmentCount: departments.size,
       });
-    } catch (error) {
-      console.error('Erro ao carregar dashboard:', error);
-    } finally {
       setLoading(false);
     }
-  };
+  }, [employeesData, attendanceData]);
 
   if (loading) {
     return (
@@ -79,8 +91,12 @@ export default function Dashboard() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-slate-900">Dashboard</h1>
-        <p className="text-slate-600 mt-1">Visão geral dos indicadores de RH e SST</p>
+        <button
+          onClick={() => setIsMetricsModalOpen(true)}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-sm"
+        >
+          Ver Métricas Funcionário
+        </button>
       </div>
 
       <div>
@@ -175,6 +191,11 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+
+      <UserMetricsModal 
+        isOpen={isMetricsModalOpen} 
+        onClose={() => setIsMetricsModalOpen(false)} 
+      />
     </div>
   );
 }

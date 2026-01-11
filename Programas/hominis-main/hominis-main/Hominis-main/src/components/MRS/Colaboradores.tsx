@@ -5,13 +5,22 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Responsi
 import * as XLSX from 'xlsx';
 import MRSCard from './MRSCard';
 import MRSStatCard from './MRSStatCard';
-import { supabase } from '../../lib/supabase';
-import { Database } from '../../lib/database.types';
+import { db } from '../../lib/firebase';
+import { collection, getDocs, query, orderBy, deleteDoc, doc, addDoc, updateDoc, where } from 'firebase/firestore';
 import { formatDate, formatNumber, getCurrentMonth } from '../../lib/format';
 import { exportToXLSX, ExportData } from '../../lib/exportUtils';
 import { calculateIntelligentRanking, RankingResult } from '../../lib/rankingEngine';
 
-type Employee = Database['public']['Tables']['employees']['Row'];
+interface Employee {
+  id: string;
+  name: string;
+  email: string;
+  department: string;
+  position: string;
+  hire_date: string;
+  active: boolean;
+  photo_url: string | null;
+}
 
 export default function Colaboradores() {
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -37,14 +46,11 @@ export default function Colaboradores() {
   const loadEmployees = async () => {
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('employees')
-        .select('*')
-        .order('name');
+      const employeesQuery = query(collection(db, 'employees'), orderBy('name'));
+      const querySnapshot = await getDocs(employeesQuery);
 
-      if (error) throw error;
-
-      if (data) {
+      if (!querySnapshot.empty) {
+        const data = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Employee[];
         setEmployees(data);
         const depts = [...new Set(data.map(e => e.department))];
         setDepartments(depts);
@@ -78,13 +84,7 @@ export default function Colaboradores() {
     if (!confirm('Tem certeza que deseja excluir este colaborador?')) return;
 
     try {
-      const { error } = await supabase
-        .from('employees')
-        .delete()
-        .eq('id', id);
-
-      if (error) throw error;
-
+      await deleteDoc(doc(db, 'employees', id));
       await loadEmployees();
       alert('Colaborador excluído com sucesso!');
     } catch (error) {
@@ -102,7 +102,7 @@ export default function Colaboradores() {
         e.email,
         e.department,
         e.position,
-        formatDate(e.hire_date),
+        e.hire_date ? formatDate(e.hire_date) : 'N/A',
         e.active ? 'Ativo' : 'Inativo'
       ]),
       filename: 'colaboradores_mrs'
@@ -170,15 +170,13 @@ export default function Colaboradores() {
           continue;
         }
 
-        const { error } = await supabase
-          .from('employees')
-          .insert([employeeData]);
-
-        if (error) {
-          errorCount++;
-          errors.push(`${employeeData.name}: ${error.message}`);
-        } else {
+        try {
+          await addDoc(collection(db, 'employees'), employeeData);
           successCount++;
+        } catch (dbError) {
+          errorCount++;
+          const errorMessage = dbError instanceof Error ? dbError.message : String(dbError);
+          errors.push(`Erro ao salvar ${employeeData.name}: ${errorMessage}`);
         }
       } catch (error) {
         errorCount++;
@@ -588,19 +586,11 @@ function EmployeeModal({ employee, onClose, onSave }: EmployeeModalProps) {
 
     try {
       if (employee) {
-        const { error } = await supabase
-          .from('employees')
-          .update(formData)
-          .eq('id', employee.id);
-
-        if (error) throw error;
+        const employeeRef = doc(db, 'employees', employee.id);
+        await updateDoc(employeeRef, formData);
         alert('Colaborador atualizado com sucesso!');
       } else {
-        const { error } = await supabase
-          .from('employees')
-          .insert([formData]);
-
-        if (error) throw error;
+        await addDoc(collection(db, 'employees'), formData);
         alert('Colaborador adicionado com sucesso!');
       }
 
@@ -827,29 +817,34 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
     setLoading(true);
     try {
       // Buscar dados básicos
-      const [trainingsData, examsData, absencesData, commentsData, rankingsData] = await Promise.all([
-        supabase.from('sst_trainings').select('*').eq('employee_id', employee.id),
-        supabase.from('sst_medical_exams').select('*').eq('employee_id', employee.id),
-        supabase.from('attendance_records').select('*').eq('employee_id', employee.id).eq('status', 'absent'),
-        supabase.from('employee_comments').select('*').eq('employee_id', employee.id).order('created_at', { ascending: false }),
-        supabase.from('employee_rankings').select('*').eq('employee_id', employee.id).order('period', { ascending: true })
+      const [trainingsSnapshot, examsSnapshot, absencesSnapshot, commentsSnapshot, rankingsSnapshot] = await Promise.all([
+        getDocs(query(collection(db, 'sst_trainings'), where('employee_id', '==', employee.id))),
+        getDocs(query(collection(db, 'sst_medical_exams'), where('employee_id', '==', employee.id))),
+        getDocs(query(collection(db, 'attendance_records'), where('employee_id', '==', employee.id), where('status', '==', 'absent'))),
+        getDocs(query(collection(db, 'employee_comments'), where('employee_id', '==', employee.id))),
+        getDocs(query(collection(db, 'employee_rankings'), where('employee_id', '==', employee.id)))
       ]);
 
-      if (trainingsData.data) setTrainings(trainingsData.data);
-      if (examsData.data) setExams(examsData.data);
-      if (absencesData.data) setAbsences(absencesData.data);
-      if (commentsData.data) setComments(commentsData.data);
-      if (rankingsData.data) {
-        setRankings(rankingsData.data);
+      setTrainings(trainingsSnapshot.docs.map(doc => doc.data()));
+      setExams(examsSnapshot.docs.map(doc => doc.data()));
+      setAbsences(absencesSnapshot.docs.map(doc => doc.data()));
+      setComments(commentsSnapshot.docs
+        .map(doc => ({ id: doc.id, ...doc.data() }))
+        .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      );
+
+      if (!rankingsSnapshot.empty) {
+        setRankings(rankingsSnapshot.docs
+          .map(doc => doc.data())
+          .sort((a: any, b: any) => a.period.localeCompare(b.period))
+        );
       }
 
       // Buscar dados do ranking consolidado (todos os períodos) - SOMA TOTAL = 283.1
-      const { data: allRankingsData, error: rankingsError } = await supabase
-        .from('employee_rankings')
-        .select('employee_id, employee_name, department, photo_url, total_score, period')
-        .eq('employee_id', employee.id);
+      const allRankingsSnapshot = await getDocs(query(collection(db, 'employee_rankings'), where('employee_id', '==', employee.id)));
+      const allRankingsData = allRankingsSnapshot.docs.map(doc => doc.data());
 
-      if (!rankingsError && allRankingsData && allRankingsData.length > 0) {
+      if (allRankingsData.length > 0) {
         // SOMA de todos os períodos (igual ao filtro "Todos os períodos" do Ranking)
         const consolidatedScore = allRankingsData.reduce((sum, r) => {
           const score = parseFloat(String(r.total_score));
@@ -857,21 +852,12 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
         }, 0);
 
         // Buscar scores para calcular detalhes por critério
-        const [allScoresResult, criteriaResult] = await Promise.all([
-          supabase
-            .from('employee_scores')
-            .select('*')
-            .eq('employee_id', employee.id),
-          supabase
-            .from('evaluation_criteria')
-            .select('*')
-            .eq('active', true)
-            .order('display_order')
-        ]);
+        const allScoresSnapshot = await getDocs(query(collection(db, 'employee_scores'), where('employee_id', '==', employee.id)));
+        const criteriaSnapshot = await getDocs(query(collection(db, 'evaluation_criteria'), where('active', '==', true), orderBy('display_order')));
 
-        if (!allScoresResult.error && !criteriaResult.error) {
-          const allScores = allScoresResult.data || [];
-          const criteriaData = criteriaResult.data || [];
+        if (!allScoresSnapshot.empty && !criteriaSnapshot.empty) {
+          const allScores = allScoresSnapshot.docs.map(doc => doc.data());
+          const criteriaData = criteriaSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
           // Calcular pontuação por critério (SOMA de todos os períodos)
           const criterionScores = criteriaData.map(criterion => {
@@ -1045,15 +1031,12 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
 
     setSavingComment(true);
     try {
-      const { error } = await supabase
-        .from('employee_comments')
-        .insert([{
-          employee_id: employee.id,
-          comment: newComment,
-          created_by: commentAuthor.trim() || 'Anônimo'
-        }]);
-
-      if (error) throw error;
+      await addDoc(collection(db, 'employee_comments'), {
+        employee_id: employee.id,
+        comment: newComment,
+        created_by: commentAuthor.trim() || 'Anônimo',
+        created_at: new Date().toISOString(),
+      });
 
       setNewComment('');
       setCommentAuthor('');
@@ -1071,13 +1054,7 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
     if (!confirm('Tem certeza que deseja excluir este comentário?')) return;
 
     try {
-      const { error } = await supabase
-        .from('employee_comments')
-        .delete()
-        .eq('id', commentId);
-
-      if (error) throw error;
-
+      await deleteDoc(doc(db, 'employee_comments', commentId));
       await loadEmployeeDetails();
     } catch (error) {
       console.error('Erro ao excluir comentário:', error);

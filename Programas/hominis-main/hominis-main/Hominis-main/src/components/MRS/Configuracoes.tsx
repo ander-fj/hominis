@@ -5,13 +5,23 @@ import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSo
 import { CSS } from '../../lib/dndUtils';
 import MRSCard from './MRSCard';
 import RecalculationStatus from './RecalculationStatus';
-import { supabase } from '../../lib/supabase';
-import { Database } from '../../lib/database.types';
+import { db } from '../../lib/firebase';
+import { collection, getDocs, doc, updateDoc, addDoc, deleteDoc, writeBatch, query, orderBy, getDoc } from 'firebase/firestore';
 import { recalculateAllRankingsEngine, generateHistoricalData } from '../../lib/rankingEngine';
 import { seedSampleData } from '../../lib/seed';
 import * as XLSX from 'xlsx';
 
-type Criterion = Database['public']['Tables']['evaluation_criteria']['Row'];
+interface Criterion {
+  id: string;
+  name: string;
+  description: string | null;
+  data_type: string;
+  weight: number;
+  direction: 'higher_better' | 'lower_better';
+  source: string;
+  display_order: number;
+  active: boolean;
+}
 
 interface SyncPage {
   id: string;
@@ -155,42 +165,36 @@ export default function Configuracoes() {
   }, []);
 
   const loadCriteria = async () => {
-    const { data } = await supabase
-      .from('evaluation_criteria')
-      .select('*')
-      .order('display_order');
+    const criteriaQuery = query(collection(db, 'evaluation_criteria'), orderBy('display_order'));
+    const querySnapshot = await getDocs(criteriaQuery);
+    const data = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Criterion[];
     if (data) setCriteria(data);
   };
 
   const loadSheetConfig = async () => {
-    const { data } = await supabase
-      .from('sheets_sync_config')
-      .select('*')
-      .maybeSingle();
-    if (data) setSheetUrl(data.sheet_url);
+    // Assuming a single document for config, e.g., with ID 'main'
+    const configDoc = await getDoc(doc(db, 'sheets_sync_config', 'main'));
+    if (configDoc.exists()) {
+      setSheetUrl(configDoc.data().sheet_url);
+    }
   };
 
   const loadSyncPages = async () => {
-    const { data } = await supabase
-      .from('sheets_sync_pages')
-      .select('*')
-      .order('page_name');
+    const pagesQuery = query(collection(db, 'sheets_sync_pages'), orderBy('page_name'));
+    const querySnapshot = await getDocs(pagesQuery);
+    const data = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as SyncPage[];
     if (data) setSyncPages(data);
   };
 
   const togglePageEnabled = async (pageId: string, currentValue: boolean) => {
-    await supabase
-      .from('sheets_sync_pages')
-      .update({ is_enabled: !currentValue })
-      .eq('id', pageId);
+    const pageRef = doc(db, 'sheets_sync_pages', pageId);
+    await updateDoc(pageRef, { is_enabled: !currentValue });
     await loadSyncPages();
   };
 
   const toggleAccumulateData = async (pageId: string, currentValue: boolean) => {
-    await supabase
-      .from('sheets_sync_pages')
-      .update({ accumulate_data: !currentValue })
-      .eq('id', pageId);
+    const pageRef = doc(db, 'sheets_sync_pages', pageId);
+    await updateDoc(pageRef, { accumulate_data: !currentValue });
     await loadSyncPages();
   };
 
@@ -213,16 +217,12 @@ export default function Configuracoes() {
     setSyncing(true);
     try {
       alert('Funcionalidade de sincronização em desenvolvimento. Em breve será possível importar dados diretamente do Google Sheets!');
-
+      const batch = writeBatch(db);
       for (const page of enabledPages) {
-        await supabase
-          .from('sheets_sync_pages')
-          .update({
-            last_sync_at: new Date().toISOString(),
-            sync_count: page.sync_count + 1
-          })
-          .eq('id', page.id);
+        const pageRef = doc(db, 'sheets_sync_pages', page.id);
+        batch.update(pageRef, { last_sync_at: new Date().toISOString(), sync_count: page.sync_count + 1 });
       }
+      await batch.commit();
 
       await loadSyncPages();
     } catch (error) {
@@ -257,7 +257,7 @@ export default function Configuracoes() {
   };
 
   const handleAdd = async () => {
-    const newCriterion: Database['public']['Tables']['evaluation_criteria']['Insert'] = {
+    const newCriterion = {
       name: 'Novo Critério',
       description: '',
       data_type: 'numeric',
@@ -268,39 +268,33 @@ export default function Configuracoes() {
       active: true,
     };
 
-    const { data, error } = await supabase
-      .from('evaluation_criteria')
-      .insert(newCriterion)
-      .select()
-      .single();
-
-    if (data && !error) {
-      setCriteria([...criteria, data]);
-    }
+    const docRef = await addDoc(collection(db, 'evaluation_criteria'), newCriterion);
+    setCriteria([...criteria, { id: docRef.id, ...newCriterion }]);
   };
 
   const handleDelete = async (id: string) => {
-    await supabase.from('evaluation_criteria').delete().eq('id', id);
+    await deleteDoc(doc(db, 'evaluation_criteria', id));
     setCriteria(prev => prev.filter(c => c.id !== id));
   };
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      for (const criterion of criteria) {
-        await supabase
-          .from('evaluation_criteria')
-          .update({
-            name: criterion.name,
-            description: criterion.description,
-            weight: criterion.weight,
-            direction: criterion.direction,
-            data_type: criterion.data_type,
-            source: criterion.source,
-            display_order: criterion.display_order,
-          })
-          .eq('id', criterion.id);
-      }
+      const batch = writeBatch(db);
+      criteria.forEach(criterion => {
+        const { id, ...dataToUpdate } = criterion;
+        const docRef = doc(db, 'evaluation_criteria', id);
+        batch.update(docRef, {
+          name: dataToUpdate.name,
+          description: dataToUpdate.description,
+          weight: dataToUpdate.weight,
+          direction: dataToUpdate.direction,
+          data_type: dataToUpdate.data_type,
+          source: dataToUpdate.source,
+          display_order: dataToUpdate.display_order,
+        });
+      });
+      await batch.commit();
       alert('Critérios salvos com sucesso!');
     } catch (error) {
       alert('Erro ao salvar critérios');
@@ -352,8 +346,7 @@ export default function Configuracoes() {
     const confirmText = 'EXCLUIR TUDO';
     const userInput = prompt(
       `⚠️ ATENÇÃO: Esta ação é IRREVERSÍVEL!\n\n` +
-      `Você está prestes a EXCLUIR TODOS OS DADOS do sistema:\n` +
-      `• Todos os colaboradores\n` +
+      `Você está prestes a EXCLUIR TODOS OS DADOS do sistema (EXCETO COLABORADORES):\n` +
       `• Todas as avaliações de desempenho\n` +
       `• Todos os treinamentos\n` +
       `• Todos os EPIs\n` +
@@ -374,33 +367,43 @@ export default function Configuracoes() {
     setDeletingAll(true);
 
     try {
-      const { data, error } = await supabase.rpc('truncate_all_data');
+      const collectionsToDelete = [
+        'employee_scores',
+        'employee_rankings',
+        'sst_trainings',
+        'sst_ppe',
+        'sst_medical_exams',
+        'sst_incidents',
+        'vacation_records',
+        'employee_comments',
+        'ranking_recalculation_queue',
+        'sst_goals',
+        'attendance_records',
+      ];
 
-      if (error) {
-        console.error('Erro ao excluir dados:', error);
-        alert(`❌ Erro ao excluir dados:\n\n${error.message}\n\nVerifique o console para mais detalhes.`);
-        setDeletingAll(false);
-      } else {
-        const logLines = data.map((row: { table_name: string; rows_deleted: number; status: string }) =>
-          `✓ ${row.table_name}: ${row.rows_deleted} registros excluídos`
-        );
+      const logLines: string[] = [];
+      let totalDeleted = 0;
 
-        const totalDeleted = data.reduce((sum: number, row: { rows_deleted: number }) => sum + row.rows_deleted, 0);
+      for (const collectionName of collectionsToDelete) {
+        const collectionRef = collection(db, collectionName);
+        const snapshot = await getDocs(query(collectionRef));
+        if (snapshot.empty) continue;
 
-        console.log('Resultado da exclusão:', data);
-
-        alert(
-          `✅ Todos os dados foram excluídos com sucesso!\n\n` +
-          `Total: ${totalDeleted} registros removidos\n\n` +
-          `${logLines.join('\n')}\n\n` +
-          `A página será recarregada automaticamente.`
-        );
-
-        // Force complete page reload with cache busting
-        setTimeout(() => {
-          window.location.reload();
-        }, 500);
+        const batch = writeBatch(db);
+        snapshot.forEach(doc => batch.delete(doc.ref));
+        await batch.commit();
+        logLines.push(`✓ ${collectionName}: ${snapshot.size} registros excluídos`);
+        totalDeleted += snapshot.size;
       }
+
+      alert(
+        `✅ Todos os dados foram excluídos com sucesso!\n\n` +
+        `Total: ${totalDeleted} registros removidos\n\n` +
+        `${logLines.join('\n')}\n\n` +
+        `A página será recarregada automaticamente.`
+      );
+
+      setTimeout(() => window.location.reload(), 500);
     } catch (error) {
       console.error('Erro ao excluir dados:', error);
       alert(`❌ Erro ao excluir dados:\n\n${error}\n\nVerifique o console para mais detalhes.`);
@@ -791,18 +794,24 @@ Sistema MRS Ranking - Gestão Inteligente de Recursos Humanos e SST
 
           console.log('   Dados preparados:', employees);
 
-          const { error } = await supabase
-            .from('employees')
-            .upsert(employees, { onConflict: 'email' });
+          const employeesCollection = collection(db, 'employees');
+          const existingEmployeesSnapshot = await getDocs(employeesCollection);
+          const employeeEmailMap = new Map(existingEmployeesSnapshot.docs.map(d => [d.data().email, d.id]));
+          const batch = writeBatch(db);
 
-          if (error) {
-            console.error('   ❌ Erro:', error);
-            errors.push(`Colaboradores: ${error.message}`);
-            errorCount++;
-          } else {
-            console.log(`   ✅ ${rows.length} colaborador(es) importado(s)`);
-            successCount += rows.length;
+          for (const employee of employees) {
+            const existingId = employeeEmailMap.get(employee.email);
+            if (existingId) {
+              // Update existing employee
+              batch.update(doc(db, 'employees', existingId), employee);
+            } else {
+              // Add new employee
+              batch.set(doc(collection(db, 'employees')), employee);
+            }
           }
+          await batch.commit();
+          console.log(`   ✅ ${rows.length} colaborador(es) importado(s)`);
+          successCount += rows.length;
         }
       } else {
         console.log('⚠️ Aba "Colaboradores" não encontrada');
@@ -817,13 +826,10 @@ Sistema MRS Ranking - Gestão Inteligente de Recursos Humanos e SST
 
         if (rows.length > 0) {
           for (const row of rows) {
-            const { data: employee } = await supabase
-              .from('employees')
-              .select('id')
-              .eq('email', row.employee_id)
-              .maybeSingle();
+            const employeesSnapshot = await getDocs(query(collection(db, 'employees'), where('email', '==', row.employee_id), limit(1)));
 
-            if (employee) {
+            if (!employeesSnapshot.empty) {
+              const employee = employeesSnapshot.docs[0];
               console.log(`   ✅ Avaliação processada para ${row.employee_id}`);
               successCount++;
             } else {
@@ -846,24 +852,21 @@ Sistema MRS Ranking - Gestão Inteligente de Recursos Humanos e SST
 
         if (rows.length > 0) {
           for (const row of rows) {
-            const { data: employee } = await supabase
-              .from('employees')
-              .select('id')
-              .eq('email', row.employee_id)
-              .maybeSingle();
+            const employeesSnapshot = await getDocs(query(collection(db, 'employees'), where('email', '==', row.employee_id), limit(1)));
 
-            if (employee) {
+            if (!employeesSnapshot.empty) {
+              const employeeId = employeesSnapshot.docs[0].id;
               const completionDate = parseExcelDate(row.training_date);
-              const { error } = await supabase
-                .from('sst_trainings')
-                .insert({
-                  employee_id: employee.id,
-                  training_name: row.training_name,
-                  training_type: 'Segurança',
-                  completion_date: completionDate,
-                  expiry_date: completionDate,
-                  status: row.status === 'Concluído' ? 'valid' : 'pending'
-                });
+              const newTraining = {
+                employee_id: employeeId,
+                training_name: row.training_name,
+                training_type: 'Segurança',
+                completion_date: completionDate,
+                expiry_date: completionDate,
+                status: row.status === 'Concluído' ? 'valid' : 'pending'
+              };
+
+              const { error } = await addDoc(collection(db, 'sst_trainings'), newTraining);
 
               if (error) {
                 console.error(`   ❌ Erro ao inserir treinamento:`, error);
@@ -893,24 +896,21 @@ Sistema MRS Ranking - Gestão Inteligente de Recursos Humanos e SST
 
         if (rows.length > 0) {
           for (const row of rows) {
-            const { data: employee } = await supabase
-              .from('employees')
-              .select('id')
-              .eq('email', row.employee_id)
-              .maybeSingle();
+            const employeesSnapshot = await getDocs(query(collection(db, 'employees'), where('email', '==', row.employee_id), limit(1)));
 
-            if (employee) {
+            if (!employeesSnapshot.empty) {
+              const employeeId = employeesSnapshot.docs[0].id;
               const deliveryDate = parseExcelDate(row.delivery_date);
-              const { error } = await supabase
-                .from('sst_ppe')
-                .insert({
-                  employee_id: employee.id,
-                  ppe_type: row.equipment_type,
-                  delivery_date: deliveryDate,
-                  expiry_date: deliveryDate,
-                  status: 'delivered',
-                  ca_number: row.ca_number
-                });
+              const newPpe = {
+                employee_id: employeeId,
+                ppe_type: row.equipment_type,
+                delivery_date: deliveryDate,
+                expiry_date: deliveryDate,
+                status: 'delivered',
+                ca_number: row.ca_number
+              };
+
+              const { error } = await addDoc(collection(db, 'sst_ppe'), newPpe);
 
               if (error) {
                 console.error(`   ❌ Erro ao inserir EPI:`, error);
@@ -940,13 +940,10 @@ Sistema MRS Ranking - Gestão Inteligente de Recursos Humanos e SST
 
         if (rows.length > 0) {
           for (const row of rows) {
-            const { data: employee } = await supabase
-              .from('employees')
-              .select('id')
-              .eq('email', row.employee_id)
-              .maybeSingle();
+            const employeesSnapshot = await getDocs(query(collection(db, 'employees'), where('email', '==', row.employee_id), limit(1)));
 
-            if (employee) {
+            if (!employeesSnapshot.empty) {
+              const employeeId = employeesSnapshot.docs[0].id;
               const examDate = parseExcelDate(row.exam_date);
 
               if (!examDate) {
@@ -956,16 +953,15 @@ Sistema MRS Ranking - Gestão Inteligente de Recursos Humanos e SST
                 continue;
               }
 
-              const { error } = await supabase
-                .from('sst_medical_exams')
-                .insert({
-                  employee_id: employee.id,
-                  exam_type: row.exam_type || 'Admissional',
-                  exam_date: examDate,
-                  next_exam_date: parseExcelDate(row.next_exam_date),
-                  status: 'valid',
-                  result: row.result || 'Apto'
-                });
+              const newExam = {
+                employee_id: employeeId,
+                exam_type: row.exam_type || 'Admissional',
+                exam_date: examDate,
+                next_exam_date: parseExcelDate(row.next_exam_date),
+                status: 'valid',
+                result: row.result || 'Apto'
+              };
+              const { error } = await addDoc(collection(db, 'sst_medical_exams'), newExam);
 
               if (error) {
                 console.error(`   ❌ Erro ao inserir exame:`, error);

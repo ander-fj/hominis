@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Target, Save, X, Edit2, Download } from 'lucide-react';
-import { supabase } from '../../lib/supabase';
+import { db } from '../../lib/firebase';
+import { collection, getDocs, doc, updateDoc, query, orderBy } from 'firebase/firestore';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 
@@ -31,12 +32,9 @@ export default function GoalsEditor({ onClose, onUpdate }: GoalsEditorProps) {
   const loadGoals = async () => {
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('sst_goals')
-        .select('*')
-        .order('goal_type');
-
-      if (error) throw error;
+      const goalsQuery = query(collection(db, 'sst_goals'), orderBy('goal_type'));
+      const querySnapshot = await getDocs(goalsQuery);
+      const data = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Goal[];
       setGoals(data || []);
     } catch (error) {
       console.error('Erro ao carregar metas:', error);
@@ -53,15 +51,11 @@ export default function GoalsEditor({ onClose, onUpdate }: GoalsEditorProps) {
   const handleSave = async (goalId: string) => {
     setSaving(true);
     try {
-      const { error } = await supabase
-        .from('sst_goals')
-        .update({
-          goal_value: editValue,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', goalId);
-
-      if (error) throw error;
+      const goalRef = doc(db, 'sst_goals', goalId);
+      await updateDoc(goalRef, {
+        goal_value: editValue,
+        updated_at: new Date().toISOString()
+      });
 
       await loadGoals();
       setEditingGoal(null);

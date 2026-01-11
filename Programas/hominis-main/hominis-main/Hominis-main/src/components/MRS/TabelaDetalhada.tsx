@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Users, Calendar, Heart, GraduationCap, Palmtree, TrendingUp, TrendingDown, AlertCircle, CheckCircle, Download, Search, Camera } from 'lucide-react';
-import { supabase } from '../../lib/supabase';
+import { collection, getDocs, query, where, orderBy } from 'firebase/firestore';
+import { db } from '../../lib/firebase';
 import MRSCard from './MRSCard';
 import PeriodFilter from './PeriodFilter';
 import { exportRankingToXLSX } from '../../lib/exportUtils';
@@ -36,35 +37,29 @@ export default function TabelaDetalhada() {
   const [searchTerm, setSearchTerm] = useState('');
   const [departmentFilter, setDepartmentFilter] = useState<string>('all');
   const [departments, setDepartments] = useState<string[]>([]);
+  const [availablePeriods, setAvailablePeriods] = useState<{ value: string; label: string }[]>([]);
 
   useEffect(() => {
     loadEmployeeDetails();
   }, [selectedPeriod, customDateRange]);
 
+  useEffect(() => {
+    const fetchPeriods = async () => {
+      const periodsQuery = query(collection(db, 'employee_rankings'), orderBy('period', 'desc'));
+      const periodsSnapshot = await getDocs(periodsQuery);
+      const periods = [...new Set(periodsSnapshot.docs.map(doc => doc.data().period as string))].filter(p => p !== 'consolidated');
+      const periodOptions = periods.map(p => ({
+        value: p,
+        label: new Date(p + 'T00:00:00').toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
+      }));
+      setAvailablePeriods(periodOptions);
+    };
+    fetchPeriods();
+  }, []);
+
   const loadEmployeeDetails = async () => {
     setLoading(true);
     try {
-      const { data: employeesData, error } = await supabase
-        .from('employees')
-        .select('*')
-        .eq('active', true)
-        .order('name');
-
-      if (error) {
-        console.error('Erro ao carregar colaboradores:', error);
-        setLoading(false);
-        return;
-      }
-
-      if (!employeesData || employeesData.length === 0) {
-        setEmployees([]);
-        setLoading(false);
-        return;
-      }
-
-      const depts = [...new Set(employeesData.map((e: any) => e.department))];
-      setDepartments(depts);
-
       let startDate: string, endDate: string;
 
       if (customDateRange) {
@@ -76,81 +71,92 @@ export default function TabelaDetalhada() {
         endDate = dateRange.endDate;
       }
 
+      // 1. Fetch all data in parallel
+      const [
+        employeesSnapshot,
+        scoresSnapshot,
+        trainingsSnapshot,
+        examsSnapshot,
+        vacationsSnapshot,
+        criteriaSnapshot,
+      ] = await Promise.all([
+        getDocs(query(collection(db, 'employees'), where('active', '==', true))),
+        getDocs(query(collection(db, 'employee_scores'), where('period', '>=', startDate), where('period', '<=', endDate))),
+        getDocs(query(collection(db, 'sst_trainings'))), // Fetch all and filter by date client-side
+        getDocs(query(collection(db, 'sst_medical_exams'))), // Fetch all and filter by date client-side
+        getDocs(query(collection(db, 'vacation_records'))), // Fetch all and filter by date client-side
+        getDocs(collection(db, 'evaluation_criteria')),
+      ]);
+
+      const employeesData = employeesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const scoresData = scoresSnapshot.docs.map(doc => doc.data());
+      const trainingsData = trainingsSnapshot.docs.map(doc => doc.data());
+      const examsData = examsSnapshot.docs.map(doc => doc.data());
+      const vacationsData = vacationsSnapshot.docs.map(doc => doc.data());
+      const criteriaMap = new Map(criteriaSnapshot.docs.map(doc => [doc.id, doc.data()]));
+      const assiduityCriterionId = [...criteriaMap.entries()].find(([, crit]) => crit.name === 'Assiduidade')?.[0];
+      const punctualityCriterionId = [...criteriaMap.entries()].find(([, crit]) => crit.name === 'Pontualidade')?.[0];
+
+      if (employeesData.length === 0) {
+        setEmployees([]);
+        setLoading(false);
+        return;
+      }
+
+      const depts = [...new Set(employeesData.map((e: any) => e.department))];
+      setDepartments(depts);
+
       const detailedData = await Promise.all(
         employeesData.map(async (emp: any) => {
-          let scoresQuery = supabase
-            .from('employee_scores')
-            .select('raw_value, evaluation_criteria(name), period')
-            .eq('employee_id', emp.id);
+          const employeeScores = scoresData.filter(s => s.employee_id === emp.id);
 
-          if (selectedPeriod !== 'all') {
-            scoresQuery = scoresQuery
-              .gte('period', startDate)
-              .lte('period', endDate);
-          }
-
-          const { data: scores } = await scoresQuery;
-
-          const assiduityScores = scores?.filter(s => {
-            if (s.evaluation_criteria?.name !== 'Assiduidade') return false;
+          const assiduityScores = employeeScores.filter(s => {
+            if (s.criterion_id !== assiduityCriterionId) return false;
             const value = parseFloat(s.raw_value);
             return !isNaN(value) && value >= 0 && value <= 100;
           }) || [];
 
-          const punctualityScores = scores?.filter(s => {
-            if (s.evaluation_criteria?.name !== 'Pontualidade') return false;
+          const punctualityScores = employeeScores.filter(s => {
+            if (s.criterion_id !== punctualityCriterionId) return false;
             const value = parseFloat(s.raw_value);
             return !isNaN(value) && value >= 0;
           }) || [];
 
           let absences = 0;
           let lateCount = 0;
-
           assiduityScores.forEach(s => {
             const assiduity = parseFloat(s.raw_value);
             absences += Math.round((100 - assiduity) / 5);
           });
-
           punctualityScores.forEach(s => {
             lateCount += Math.round(parseFloat(s.raw_value));
           });
 
-          const { data: trainings } = await supabase
-            .from('sst_trainings')
-            .select('status, completion_date, expiry_date')
-            .eq('employee_id', emp.id);
-
-          const allTrainings = trainings || [];
+          const allTrainings = trainingsData.filter(t => t.employee_id === emp.id);
           const trainingsCount = allTrainings.length;
           const trainingsValid = allTrainings.filter(t => t.status === 'valid').length;
 
-          const { data: allExams } = await supabase
-            .from('sst_medical_exams')
-            .select('*')
-            .eq('employee_id', emp.id)
-            .order('exam_date', { ascending: false });
+          const allExams = examsData
+            .filter(e => e.employee_id === emp.id)
+            .sort((a, b) => new Date(b.exam_date).getTime() - new Date(a.exam_date).getTime());
+          const latestExam = allExams[0];
 
-          const latestExam = allExams?.[0];
-
-          const examsInPeriod = allExams?.filter(e => {
+          const examsInPeriod = allExams.filter(e => {
             if (!e.exam_date) return false;
             const examDate = new Date(e.exam_date);
             return examDate >= new Date(startDate) && examDate <= new Date(endDate);
           }) || [];
 
-          const { data: allVacations } = await supabase
-            .from('vacation_records')
-            .select('*')
-            .eq('employee_id', emp.id)
-            .order('period_start', { ascending: false });
+          const allVacations = vacationsData
+            .filter(v => v.employee_id === emp.id)
+            .sort((a, b) => new Date(b.period_start).getTime() - new Date(a.period_start).getTime());
 
-          const vacationInPeriod = allVacations?.find(v => {
+          const vacationInPeriod = allVacations.find(v => {
             if (!v.period_start) return false;
             const vacStart = new Date(v.period_start);
             const vacEnd = v.period_end ? new Date(v.period_end) : vacStart;
             const periodStart = new Date(startDate);
             const periodEnd = new Date(endDate);
-
             return (
               (vacStart >= periodStart && vacStart <= periodEnd) ||
               (vacEnd >= periodStart && vacEnd <= periodEnd) ||
@@ -289,6 +295,8 @@ export default function TabelaDetalhada() {
             onCustomRangeChange={(startDate, endDate) => {
               setCustomDateRange({ startDate, endDate });
             }}
+            periods={availablePeriods}
+            loading={loading}
           />
           <button
             onClick={handleScreenshot}

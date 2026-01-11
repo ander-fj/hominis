@@ -1,9 +1,11 @@
 import { useState, useRef } from 'react';
 import { Upload, FileSpreadsheet, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { supabase } from '../../lib/supabase';
 import MRSCard from './MRSCard';
+import { db } from '../../lib/firebase';
+import { collection, getDocs, query, where, addDoc, updateDoc, doc, writeBatch, limit } from 'firebase/firestore';
 import { calculateIntelligentRanking } from '../../lib/rankingEngine';
+import { seedCriteriaIfEmpty } from '../../lib/seed';
 
 type ImportType = 'colaboradores' | 'avaliacoes' | 'treinamentos' | 'epis' | 'exames' | 'incidentes' | 'ferias';
 
@@ -131,36 +133,25 @@ export default function ImportacaoIndividual() {
 
     try {
       // Verify employees exist for non-employee imports
+      // Add a small delay to ensure seeded data is available for querying
+      await new Promise(resolve => setTimeout(resolve, 500));
+
       if (type !== 'colaboradores') {
-        console.log(`[${type}] Verificando se existem colaboradores...`);
+        const employeesQuery = query(collection(db, 'employees'), limit(1));
+        const employeesSnapshot = await getDocs(employeesQuery);
 
-        const { data: employees, error: empError, count } = await supabase
-          .from('employees')
-          .select('id', { count: 'exact' })
-          .limit(1);
-
-        console.log(`[${type}] Resultado da verificação:`, {
-          employees,
-          error: empError,
-          count,
-          hasData: !!employees,
-          length: employees?.length
-        });
-
-        if (empError) {
-          console.error(`[${type}] Erro ao verificar colaboradores:`, empError);
-          updateStatus(type, 'error', `Erro ao verificar colaboradores: ${empError.message}`, 0);
-          return;
-        }
-
-        if (!employees || employees.length === 0) {
-          console.error(`[${type}] Nenhum colaborador encontrado na base de dados`);
+        if (employeesSnapshot.empty) {
           updateStatus(type, 'error', 'Colaboradores não encontrados. Importe primeiro a planilha de Colaboradores.', 0);
           return;
         }
-
-        console.log(`[${type}] Verificação OK - ${count || employees.length} colaboradores encontrados`);
       }
+
+      // Pre-fetch employees for mapping emails to IDs, improving performance
+      const employeesSnapshot = await getDocs(collection(db, 'employees'));
+      const employeeEmailMap = new Map(employeesSnapshot.docs.map(doc => [
+        doc.data().email.toLowerCase(),
+        { id: doc.id, department: doc.data().department }
+      ]));
 
       const data = await file.arrayBuffer();
       const workbook = XLSX.read(data);
@@ -183,52 +174,62 @@ export default function ImportacaoIndividual() {
       let errorCount = 0;
 
       switch (type) {
-        case 'colaboradores':
+        case 'colaboradores': {
+          const batch = writeBatch(db);
           for (const row of rows) {
-            const { error } = await supabase
-              .from('employees')
-              .upsert({
+            try {
+              const employeeData = {
                 name: row.nome || row.name,
-                email: row.email,
+                email: (row.email || '').toLowerCase(),
                 department: row.departamento || row.department,
                 position: row.cargo || row.position,
                 hire_date: parseExcelDate(row.data_admissao || row.hire_date),
-                photo_url: row.foto_url || row.photo_url || null
-              }, { onConflict: 'email' });
+                photo_url: row.foto_url || row.photo_url || null,
+                active: true, // Default to active
+              };
 
-            error ? errorCount++ : successCount++;
+              if (!employeeData.name || !employeeData.email) continue;
+
+              const newDocRef = doc(collection(db, 'employees'));
+              batch.set(newDocRef, employeeData);
+              successCount++;
+            } catch {
+              errorCount++;
+            }
           }
+          await batch.commit();
           break;
+        }
 
-        case 'avaliacoes':
+        case 'avaliacoes': {
           console.log(`Iniciando importação de ${rows.length} avaliações...`);
 
-          const { data: criteria, error: critError } = await supabase
-            .from('evaluation_criteria')
-            .select('id, name');
+          let criteriaSnapshot = await getDocs(collection(db, 'evaluation_criteria'));
+          if (criteriaSnapshot.empty) {
+            console.warn('Critérios não encontrados, tentando semear automaticamente...');
+            await seedCriteriaIfEmpty();
+            criteriaSnapshot = await getDocs(collection(db, 'evaluation_criteria')); // Tenta buscar novamente
+          }
 
-          if (critError || !criteria || criteria.length === 0) {
+          if (criteriaSnapshot.empty) {
             console.error('Critérios não encontrados');
             updateStatus(type, 'error', 'Critérios de avaliação não encontrados no sistema', 0);
             return;
           }
+          const criteria = criteriaSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
           const horasCriteria = criteria.find(c => c.name === 'Horas Trabalhadas');
           const faltasCriteria = criteria.find(c => c.name === 'Assiduidade');
           const atrasosCriteria = criteria.find(c => c.name === 'Pontualidade');
 
+          const batch = writeBatch(db);
           for (let i = 0; i < rows.length; i++) {
             const row = rows[i];
             console.log(`Processando linha ${i + 1}/${rows.length}...`);
 
             try {
-              const { data: employee, error: empError } = await supabase
-                .from('employees')
-                .select('id')
-                .eq('email', row.employee_id)
-                .maybeSingle();
-
-              if (empError || !employee) {
+              const employee = employeeEmailMap.get((row.employee_id || '').toLowerCase());
+              if (!employee) {
                 console.error('Colaborador não encontrado:', row.employee_id);
                 errorCount++;
                 continue;
@@ -257,7 +258,7 @@ export default function ImportacaoIndividual() {
                   period: periodo,
                   criterion_id: horasCriteria.id,
                   raw_value: horas,
-                  normalized_score: horas / 220
+                  normalized_score: 0 // A normalização será feita pelo rankingEngine
                 });
               }
 
@@ -269,7 +270,7 @@ export default function ImportacaoIndividual() {
                   period: periodo,
                   criterion_id: faltasCriteria.id,
                   raw_value: assiduidade,
-                  normalized_score: assiduidade / 100
+                  normalized_score: 0 // A normalização será feita pelo rankingEngine
                 });
               }
 
@@ -280,7 +281,7 @@ export default function ImportacaoIndividual() {
                   period: periodo,
                   criterion_id: atrasosCriteria.id,
                   raw_value: atrasos,
-                  normalized_score: Math.max(0, 1 - (atrasos / 10))
+                  normalized_score: 0 // A normalização será feita pelo rankingEngine
                 });
               }
 
@@ -290,121 +291,97 @@ export default function ImportacaoIndividual() {
               }
 
               for (const score of scores) {
-                const { error: scoreError } = await supabase
-                  .from('employee_scores')
-                  .upsert(score, {
-                    onConflict: 'employee_id,period,criterion_id'
-                  });
-
-                if (scoreError) {
-                  console.error('Erro ao inserir score:', scoreError);
-                  errorCount++;
-                } else {
-                  successCount++;
-                }
+                const docId = `${score.employee_id}_${score.period}_${score.criterion_id}`;
+                const docRef = doc(db, 'employee_scores', docId);
+                batch.set(docRef, score, { merge: true });
+                successCount++;
               }
             } catch (err) {
               console.error('Erro ao processar linha:', err);
               errorCount++;
             }
           }
+          await batch.commit();
           break;
+        }
 
-        case 'treinamentos':
+        case 'treinamentos': {
+          const batch = writeBatch(db);
           for (const row of rows) {
-            const { data: employee } = await supabase
-              .from('employees')
-              .select('id')
-              .eq('email', row.employee_id)
-              .maybeSingle();
-
+            const employee = employeeEmailMap.get((row.employee_id || '').toLowerCase());
             if (!employee) {
               errorCount++;
               continue;
             }
-
-            const { error } = await supabase
-              .from('sst_trainings')
-              .insert({
-                employee_id: employee.id,
-                training_name: row.training_name,
-                training_type: row.training_type || 'Segurança',
-                completion_date: parseExcelDate(row.training_date),
-                expiry_date: parseExcelDate(row.expiry_date),
-                status: row.status === 'Concluído' ? 'valid' : 'pending'
-              });
-
-            error ? errorCount++ : successCount++;
+            const newDocRef = doc(collection(db, 'sst_trainings'));
+            batch.set(newDocRef, {
+              employee_id: employee.id,
+              training_name: row.training_name,
+              training_type: row.training_type || 'Segurança',
+              completion_date: parseExcelDate(row.training_date),
+              expiry_date: parseExcelDate(row.expiry_date),
+              status: row.status === 'Concluído' ? 'valid' : 'pending'
+            });
+            successCount++;
           }
+          await batch.commit();
           break;
+        }
 
-        case 'epis':
+        case 'epis': {
+          const batch = writeBatch(db);
           for (const row of rows) {
-            const { data: employee } = await supabase
-              .from('employees')
-              .select('id')
-              .eq('email', row.employee_id)
-              .maybeSingle();
-
+            const employee = employeeEmailMap.get((row.employee_id || '').toLowerCase());
             if (!employee) {
               errorCount++;
               continue;
             }
-
-            const { error } = await supabase
-              .from('sst_ppe')
-              .insert({
-                employee_id: employee.id,
-                ppe_type: row.equipment_type,
-                delivery_date: parseExcelDate(row.delivery_date),
-                expiry_date: parseExcelDate(row.expiry_date),
-                status: 'delivered',
-                ca_number: row.ca_number,
-                condition: row.condition || 'Novo'
-              });
-
-            error ? errorCount++ : successCount++;
+            const newDocRef = doc(collection(db, 'sst_ppe'));
+            batch.set(newDocRef, {
+              employee_id: employee.id,
+              ppe_type: row.equipment_type,
+              delivery_date: parseExcelDate(row.delivery_date),
+              expiry_date: parseExcelDate(row.expiry_date),
+              status: 'delivered',
+              ca_number: row.ca_number,
+              condition: row.condition || 'Novo'
+            });
+            successCount++;
           }
+          await batch.commit();
           break;
+        }
 
-        case 'exames':
+        case 'exames': {
+          const batch = writeBatch(db);
           for (const row of rows) {
-            const { data: employee } = await supabase
-              .from('employees')
-              .select('id')
-              .eq('email', row.employee_id)
-              .maybeSingle();
-
+            const employee = employeeEmailMap.get((row.employee_id || '').toLowerCase());
             if (!employee) {
               errorCount++;
               continue;
             }
-
-            const { error } = await supabase
-              .from('sst_medical_exams')
-              .insert({
-                employee_id: employee.id,
-                exam_type: row.exam_type || 'Admissional',
-                exam_date: parseExcelDate(row.exam_date),
-                next_exam_date: parseExcelDate(row.next_exam_date),
-                status: 'valid',
-                result: row.result || 'Apto'
-              });
-
-            error ? errorCount++ : successCount++;
+            const newDocRef = doc(collection(db, 'sst_medical_exams'));
+            batch.set(newDocRef, {
+              employee_id: employee.id,
+              exam_type: row.exam_type || 'Admissional',
+              exam_date: parseExcelDate(row.exam_date),
+              next_exam_date: parseExcelDate(row.next_exam_date),
+              status: 'valid',
+              result: row.result || 'Apto'
+            });
+            successCount++;
           }
+          await batch.commit();
           break;
+        }
 
-        case 'incidentes':
+        case 'incidentes': {
+          const batch = writeBatch(db);
           for (const row of rows) {
             console.log('[incidentes] Processando linha:', row);
             console.log('[incidentes] Keys disponíveis:', Object.keys(row));
 
-            const { data: employee } = await supabase
-              .from('employees')
-              .select('id, department')
-              .eq('email', row.employee_id)
-              .maybeSingle();
+            const employee = employeeEmailMap.get((row.employee_id || '').toLowerCase());
 
             console.log('[incidentes] Colaborador encontrado:', employee);
 
@@ -437,49 +414,38 @@ export default function ImportacaoIndividual() {
               department: employee.department,
               days_lost: row.days_lost || 0
             };
-
             console.log('[incidentes] Dados a serem inseridos:', incidentData);
 
-            const { error } = await supabase
-              .from('sst_incidents')
-              .insert(incidentData);
-
-            if (error) {
-              console.error('Erro ao inserir incidente:', error);
-              errorCount++;
-            } else {
-              successCount++;
-            }
+            const newDocRef = doc(collection(db, 'sst_incidents'));
+            batch.set(newDocRef, incidentData);
+            successCount++;
           }
+          await batch.commit();
           break;
+        }
 
-        case 'ferias':
+        case 'ferias': {
+          const batch = writeBatch(db);
           for (const row of rows) {
-            const { data: employee } = await supabase
-              .from('employees')
-              .select('id')
-              .eq('email', row.employee_id)
-              .maybeSingle();
-
+            const employee = employeeEmailMap.get((row.employee_id || '').toLowerCase());
             if (!employee) {
               errorCount++;
               continue;
             }
-
-            const { error } = await supabase
-              .from('vacation_records')
-              .insert({
-                employee_id: employee.id,
-                period_start: parseExcelDate(row.period_start),
-                period_end: parseExcelDate(row.period_end),
-                days_taken: row.days_taken || 0,
-                status: row.status || 'Planejado',
-                notes: row.notes
-              });
-
-            error ? errorCount++ : successCount++;
+            const newDocRef = doc(collection(db, 'vacation_records'));
+            batch.set(newDocRef, {
+              employee_id: employee.id,
+              period_start: parseExcelDate(row.period_start),
+              period_end: parseExcelDate(row.period_end),
+              days_taken: row.days_taken || 0,
+              status: row.status || 'Planejado',
+              notes: row.notes || null
+            });
+            successCount++;
           }
+          await batch.commit();
           break;
+        }
       }
 
       if (successCount > 0) {

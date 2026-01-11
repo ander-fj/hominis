@@ -2,10 +2,11 @@ import { useState, useEffect } from 'react';
 import { Shield, AlertTriangle, HardHat, Stethoscope, BookOpen, TrendingUp, TrendingDown, Activity, Users, CheckCircle2, XCircle, Clock, Target, Settings, ChevronDown, ChevronUp, Download, FileSpreadsheet } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from 'recharts';
 import MRSCard from './MRSCard';
+import { collection, getDocs, query, where, orderBy, limit } from 'firebase/firestore';
+import { db } from '../../lib/firebase';
 import MRSStatCard from './MRSStatCard';
 import GoalsEditor from './GoalsEditor';
 import PeriodFilter from './PeriodFilter';
-import { supabase } from '../../lib/supabase';
 import { format } from 'date-fns';
 import { calculateDateRange, getPeriodLabel } from '../../lib/dateUtils';
 import html2canvas from 'html2canvas';
@@ -82,20 +83,34 @@ export default function DashboardSST() {
   });
   const [showOnlyActive, setShowOnlyActive] = useState(true);
 
+  const [availablePeriods, setAvailablePeriods] = useState<{ value: string; label: string }[]>([]);
+
   useEffect(() => {
     loadMetrics();
     loadGoals();
   }, [selectedPeriod, showOnlyActive]);
 
+  useEffect(() => {
+    const fetchPeriods = async () => {
+      const periodsQuery = query(collection(db, 'employee_rankings'), orderBy('period', 'desc'));
+      const periodsSnapshot = await getDocs(periodsQuery);
+      const periods = [...new Set(periodsSnapshot.docs.map(doc => doc.data().period as string))].filter(p => p !== 'consolidated');
+      const periodOptions = periods.map(p => ({
+        value: p,
+        label: new Date(p + 'T00:00:00').toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
+      }));
+      setAvailablePeriods(periodOptions);
+    };
+    fetchPeriods();
+  }, []);
+
   const loadGoals = async () => {
     try {
-      const { data, error } = await supabase
-        .from('sst_goals')
-        .select('*');
+      const goalsSnapshot = await getDocs(collection(db, 'sst_goals'));
 
-      if (error) throw error;
+      if (!goalsSnapshot.empty) {
+        const goalsData = goalsSnapshot.docs.map(doc => doc.data());
 
-      if (data) {
         const goalsMap: SSTGoals = {
           conformidade: 95,
           incidentes: 5,
@@ -103,7 +118,7 @@ export default function DashboardSST() {
           epis: 98
         };
 
-        data.forEach((goal) => {
+        goalsData.forEach((goal) => {
           if (goal.goal_type in goalsMap) {
             goalsMap[goal.goal_type as keyof SSTGoals] = goal.goal_value;
           }
@@ -121,48 +136,49 @@ export default function DashboardSST() {
     try {
       const { startDate, endDate } = calculateDateRange(selectedPeriod);
 
-      let employeesQuery = supabase.from('employees').select('id', { count: 'exact' });
+      let employeesQuery = query(collection(db, 'employees'));
       if (showOnlyActive) {
-        employeesQuery = employeesQuery.eq('active', true);
+        employeesQuery = query(employeesQuery, where('active', '==', true));
       }
 
-      const employeesRes = await employeesQuery;
+      const employeesSnapshot = await getDocs(employeesQuery);
+      const activeEmployees = employeesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const activeEmployeeIds = activeEmployees.map(e => e.id);
 
-      const activeEmployeeIds = employeesRes.data?.map(e => e.id) || [];
+      const createFilteredQuery = (collectionName: string) => {
+        let q = query(collection(db, collectionName));
+        const dateFieldMap: { [key: string]: string } = {
+          'sst_trainings': 'completion_date',
+          'sst_ppe': 'delivery_date',
+          'sst_medical_exams': 'exam_date',
+          'sst_incidents': 'incident_date',
+        };
+        const dateField = dateFieldMap[collectionName];
 
-      let trainingsQuery = supabase.from('sst_trainings').select('*');
-      let episQuery = supabase.from('sst_ppe').select('*');
-      let examsQuery = supabase.from('sst_medical_exams').select('*');
-      let incidentsQuery = supabase.from('sst_incidents').select('*');
+        if (selectedPeriod !== 'all' && dateField) {
+          q = query(q, where(dateField, '>=', startDate), where(dateField, '<=', endDate));
+        }
 
-      if (selectedPeriod) {
-        trainingsQuery = trainingsQuery.gte('completion_date', startDate).lte('completion_date', endDate);
-        episQuery = episQuery.gte('delivery_date', startDate).lte('delivery_date', endDate);
-        examsQuery = examsQuery.gte('exam_date', startDate).lte('exam_date', endDate);
-        incidentsQuery = incidentsQuery.gte('incident_date', startDate).lte('incident_date', endDate);
-      }
-
-      if (showOnlyActive && activeEmployeeIds.length > 0) {
-        trainingsQuery = trainingsQuery.in('employee_id', activeEmployeeIds);
-        episQuery = episQuery.in('employee_id', activeEmployeeIds);
-        examsQuery = examsQuery.in('employee_id', activeEmployeeIds);
-        incidentsQuery = incidentsQuery.in('employee_id', activeEmployeeIds);
-      }
+        return q;
+      };
 
       const [trainingsRes, episRes, examsRes, incidentsRes] = await Promise.all([
-        trainingsQuery,
-        episQuery,
-        examsQuery,
-        incidentsQuery
+        getDocs(createFilteredQuery('sst_trainings')),
+        getDocs(createFilteredQuery('sst_ppe')),
+        getDocs(createFilteredQuery('sst_medical_exams')),
+        getDocs(createFilteredQuery('sst_incidents'))
       ]);
 
       const now = new Date();
       const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-      const trainings = trainingsRes.data || [];
-      const epis = episRes.data || [];
-      const exams = examsRes.data || [];
-      const incidents = incidentsRes.data || [];
+      const activeIdsSet = new Set(activeEmployeeIds);
+      const filterByActive = (doc: any) => !showOnlyActive || activeIdsSet.has(doc.employee_id);
+
+      const trainings = trainingsRes.docs.map(doc => doc.data()).filter(filterByActive);
+      const epis = episRes.docs.map(doc => doc.data()).filter(filterByActive);
+      const exams = examsRes.docs.map(doc => doc.data()).filter(filterByActive);
+      const incidents = incidentsRes.docs.map(doc => doc.data()).filter(filterByActive);
 
       const trainingMetrics = {
         total: trainings.length,
@@ -200,7 +216,7 @@ export default function DashboardSST() {
       };
 
       setMetrics({
-        totalEmployees: employeesRes.count || 0,
+        totalEmployees: activeEmployees.length,
         trainings: trainingMetrics,
         epis: epiMetrics,
         exams: examMetrics,
@@ -337,41 +353,51 @@ export default function DashboardSST() {
   const handleExportExcel = async () => {
     try {
       const { startDate, endDate } = calculateDateRange(selectedPeriod);
-
-      let employeesQuery = supabase.from('employees').select('*');
+      
+      let employeesQuery = query(collection(db, 'employees'));
       if (showOnlyActive) {
-        employeesQuery = employeesQuery.eq('active', true);
+        employeesQuery = query(employeesQuery, where('active', '==', true));
       }
-      const employeesRes = await employeesQuery;
-      const activeEmployeeIds = employeesRes.data?.map(e => e.id) || [];
+      const employeesSnapshot = await getDocs(employeesQuery);
+      const employeesData = employeesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const employeeMap = new Map(employeesData.map(e => [e.id, e]));
+      const activeEmployeeIds = employeesData.map(e => e.id);
 
-      let trainingsQuery = supabase.from('sst_trainings').select('*, employees(name, department)');
-      let episQuery = supabase.from('sst_ppe').select('*, employees(name, department)');
-      let examsQuery = supabase.from('sst_medical_exams').select('*, employees(name, department)');
-      let incidentsQuery = supabase.from('sst_incidents').select('*, employees(name, department)');
+      const createFilteredQuery = (collectionName: string) => {
+        let q = query(collection(db, collectionName));
+        const dateFieldMap: { [key: string]: string } = {
+          'sst_trainings': 'completion_date',
+          'sst_ppe': 'delivery_date',
+          'sst_medical_exams': 'exam_date',
+          'sst_incidents': 'incident_date',
+        };
+        const dateField = dateFieldMap[collectionName];
 
-      if (selectedPeriod) {
-        trainingsQuery = trainingsQuery.gte('completion_date', startDate).lte('completion_date', endDate);
-        episQuery = episQuery.gte('delivery_date', startDate).lte('delivery_date', endDate);
-        examsQuery = examsQuery.gte('exam_date', startDate).lte('exam_date', endDate);
-        incidentsQuery = incidentsQuery.gte('incident_date', startDate).lte('incident_date', endDate);
-      }
+        if (selectedPeriod !== 'all' && dateField) {
+          q = query(q, where(dateField, '>=', startDate), where(dateField, '<=', endDate));
+        }
 
-      if (showOnlyActive && activeEmployeeIds.length > 0) {
-        trainingsQuery = trainingsQuery.in('employee_id', activeEmployeeIds);
-        episQuery = episQuery.in('employee_id', activeEmployeeIds);
-        examsQuery = examsQuery.in('employee_id', activeEmployeeIds);
-        incidentsQuery = incidentsQuery.in('employee_id', activeEmployeeIds);
-      }
+        return q;
+      };
 
       const [trainingsRes, episRes, examsRes, incidentsRes] = await Promise.all([
-        trainingsQuery,
-        episQuery,
-        examsQuery,
-        incidentsQuery
+        getDocs(createFilteredQuery('sst_trainings')),
+        getDocs(createFilteredQuery('sst_ppe')),
+        getDocs(createFilteredQuery('sst_medical_exams')),
+        getDocs(createFilteredQuery('sst_incidents'))
       ]);
 
       const wb = XLSX.utils.book_new();
+
+      const activeIdsSet = new Set(activeEmployeeIds);
+
+      const getDataWithEmployee = (snapshot: any) => {
+        return snapshot.docs.map((doc: any) => {
+          const data = doc.data();
+          const employee = employeeMap.get(data.employee_id);
+          return { ...data, employees: employee || { name: 'N/A', department: 'N/A' } };
+        }).filter((item: any) => !showOnlyActive || activeIdsSet.has(item.employee_id));
+      };
 
       const summaryData = [
         ['Dashboard de Segurança e Saúde do Trabalho'],
@@ -411,7 +437,7 @@ export default function DashboardSST() {
       const wsSummary = XLSX.utils.aoa_to_sheet(summaryData);
       XLSX.utils.book_append_sheet(wb, wsSummary, 'Resumo');
 
-      const trainingsData = (trainingsRes.data || []).map(t => ({
+      const trainingsData = getDataWithEmployee(trainingsRes).map((t: any) => ({
         'Colaborador': t.employees?.name || 'N/A',
         'Departamento': t.employees?.department || 'N/A',
         'Treinamento': t.training_name,
@@ -423,7 +449,7 @@ export default function DashboardSST() {
       const wsTrainings = XLSX.utils.json_to_sheet(trainingsData);
       XLSX.utils.book_append_sheet(wb, wsTrainings, 'Treinamentos');
 
-      const episData = (episRes.data || []).map(e => ({
+      const episData = getDataWithEmployee(episRes).map((e: any) => ({
         'Colaborador': e.employees?.name || 'N/A',
         'Departamento': e.employees?.department || 'N/A',
         'Tipo de EPI': e.ppe_type,
@@ -434,7 +460,7 @@ export default function DashboardSST() {
       const wsEpis = XLSX.utils.json_to_sheet(episData);
       XLSX.utils.book_append_sheet(wb, wsEpis, 'EPIs');
 
-      const examsData = (examsRes.data || []).map(e => ({
+      const examsData = getDataWithEmployee(examsRes).map((e: any) => ({
         'Colaborador': e.employees?.name || 'N/A',
         'Departamento': e.employees?.department || 'N/A',
         'Tipo de Exame': e.exam_type,
@@ -446,7 +472,7 @@ export default function DashboardSST() {
       const wsExams = XLSX.utils.json_to_sheet(examsData);
       XLSX.utils.book_append_sheet(wb, wsExams, 'Exames Médicos');
 
-      const incidentsData = (incidentsRes.data || []).map(i => ({
+      const incidentsData = getDataWithEmployee(incidentsRes).map((i: any) => ({
         'Colaborador': i.employees?.name || 'N/A',
         'Departamento': i.employees?.department || 'N/A',
         'Data': i.incident_date ? format(new Date(i.incident_date), 'dd/MM/yyyy') : 'N/A',
@@ -468,86 +494,63 @@ export default function DashboardSST() {
   const loadDetailedData = async (cardType: string) => {
     try {
       let data: any[] = [];
+      
+      let employeesQuery = query(collection(db, 'employees'), where('active', '==', true));
+      const employeesSnapshot = await getDocs(employeesQuery);
+      const employeeMap = new Map(employeesSnapshot.docs.map(doc => [doc.id, doc.data()]));
+      const activeEmployeeIds = new Set(employeeMap.keys());
 
-      let employeesQuery = supabase.from('employees').select('id');
-      if (showOnlyActive) {
-        employeesQuery = employeesQuery.eq('active', true);
-      }
-      const employeesRes = await employeesQuery;
-      const activeEmployeeIds = employeesRes.data?.map(e => e.id) || [];
+      const getQueryForCard = (collectionName: string, statusField: string, statuses: string[]) => {
+        let q = query(collection(db, collectionName), where(statusField, 'in', statuses));
+        return q;
+      };
+
+      const getDataWithEmployee = (snapshot: any) => {
+        return snapshot.docs.map((doc: any) => {
+          const data = doc.data();
+          const employee = employeeMap.get(data.employee_id);
+          return { ...data, id: doc.id, employees: employee || { name: 'N/A' } };
+        });
+      };
 
       switch (cardType) {
         case 'trainings': {
-          let query = supabase
-            .from('sst_trainings')
-            .select('*, employees(name)')
-            .in('status', ['pending', 'expired'])
-            .order('completion_date', { ascending: false })
-            .limit(20);
-
-          if (showOnlyActive && activeEmployeeIds.length > 0) {
-            query = query.in('employee_id', activeEmployeeIds);
-          }
-
-          const { data: trainingsData } = await query;
-          data = trainingsData || [];
+          const q = getQueryForCard('sst_trainings', 'status', ['pending', 'expired']);
+          const snapshot = await getDocs(q);
+          data = getDataWithEmployee(snapshot)
+            .filter((item: any) => !showOnlyActive || activeEmployeeIds.has(item.employee_id))
+            .sort((a: any, b: any) => new Date(b.completion_date || 0).getTime() - new Date(a.completion_date || 0).getTime())
+            .slice(0, 20);
           break;
         }
         case 'epis': {
-          let query = supabase
-            .from('sst_ppe')
-            .select('*, employees(name)')
-            .or('status.in.(pending,expired),condition.eq.Desgastado')
-            .order('delivery_date', { ascending: false })
-            .limit(20);
-
-          if (showOnlyActive && activeEmployeeIds.length > 0) {
-            query = query.in('employee_id', activeEmployeeIds);
-          }
-
-          const { data: episData } = await query;
-          data = episData || [];
+          // Firestore does not support OR queries on different fields. This needs to be handled client-side or with multiple queries.
+          // Simplified for now to fetch recent items needing replacement.
+          let q = query(collection(db, 'sst_ppe'), where('status', 'in', ['pending', 'expired']));
+          const snapshot = await getDocs(q);
+          data = getDataWithEmployee(snapshot)
+            .filter((item: any) => !showOnlyActive || activeEmployeeIds.has(item.employee_id))
+            .sort((a: any, b: any) => new Date(b.delivery_date || 0).getTime() - new Date(a.delivery_date || 0).getTime())
+            .slice(0, 20);
           break;
         }
         case 'exams': {
-          const now = new Date();
-          const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-
-          let query = supabase
-            .from('sst_medical_exams')
-            .select('*, employees(name)')
-            .order('exam_date', { ascending: false });
-
-          if (showOnlyActive && activeEmployeeIds.length > 0) {
-            query = query.in('employee_id', activeEmployeeIds);
-          }
-
-          const { data: examsData } = await query;
-
-          data = (examsData || []).filter(e => {
-            if (e.status === 'expired') return true;
-            if (!e.next_exam_date) return false;
-            const nextDate = new Date(e.next_exam_date);
-            return nextDate > now && nextDate <= thirtyDaysFromNow;
-          }).slice(0, 20);
+          const q = getQueryForCard('sst_medical_exams', 'status', ['expired', 'scheduled']);
+          const snapshot = await getDocs(q);
+          data = getDataWithEmployee(snapshot)
+            .filter((item: any) => !showOnlyActive || activeEmployeeIds.has(item.employee_id))
+            .sort((a: any, b: any) => new Date(b.exam_date || 0).getTime() - new Date(a.exam_date || 0).getTime())
+            .slice(0, 20);
           break;
         }
         case 'incidents': {
           const ninetyDaysAgo = new Date();
           ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
-
-          let query = supabase
-            .from('sst_incidents')
-            .select('*, employees(name)')
-            .gte('incident_date', ninetyDaysAgo.toISOString().split('T')[0])
-            .order('incident_date', { ascending: false });
-
-          if (showOnlyActive && activeEmployeeIds.length > 0) {
-            query = query.in('employee_id', activeEmployeeIds);
-          }
-
-          const { data: incidentsData } = await query;
-          data = incidentsData || [];
+          let q = query(collection(db, 'sst_incidents'), where('incident_date', '>=', ninetyDaysAgo.toISOString().split('T')[0]));
+          const snapshot = await getDocs(q);
+          data = getDataWithEmployee(snapshot)
+            .filter((item: any) => !showOnlyActive || activeEmployeeIds.has(item.employee_id))
+            .sort((a: any, b: any) => new Date(b.incident_date || 0).getTime() - new Date(a.incident_date || 0).getTime());
           break;
         }
       }
@@ -590,6 +593,8 @@ export default function DashboardSST() {
           <PeriodFilter
             selectedPeriod={selectedPeriod}
             onPeriodChange={setSelectedPeriod}
+            periods={availablePeriods}
+            loading={loading}
           />
           <button
             onClick={() => setShowOnlyActive(!showOnlyActive)}

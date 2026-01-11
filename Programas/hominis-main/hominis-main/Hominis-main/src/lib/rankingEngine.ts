@@ -1,9 +1,21 @@
-import { supabase } from './supabase';
-import { Database } from './database.types';
+import { db } from './firebase';
+import { collection, getDocs, query, where, writeBatch, doc, setDoc, orderBy } from 'firebase/firestore';
+import { format } from 'date-fns';
+interface EvaluationCriteria {
+  id: string;
+  name: string;
+  weight: number;
+  direction: 'higher_better' | 'lower_better';
+  metric_type?: string;
+}
 
-type EvaluationCriteria = Database['public']['Tables']['evaluation_criteria']['Row'];
-type EmployeeScore = Database['public']['Tables']['employee_scores']['Row'];
-type Employee = Database['public']['Tables']['employees']['Row'];
+interface EmployeeScore {
+  id: string; employee_id: string; criterion_id: string; period: string; raw_value: number; normalized_score: number | null;
+}
+
+interface Employee {
+  id: string; name: string; email: string; department: string; position: string; photo_url?: string; active: boolean;
+}
 
 export interface CriterionScore {
   criterion_id: string;
@@ -55,30 +67,37 @@ export async function calculateIntelligentRanking(period: string, useCache: bool
 
     const previousMonth = isConsolidated ? '' : getPreviousMonth(period);
 
-    let scoresQuery = supabase.from('employee_scores').select('*');
+    let scoresFirestoreQuery = collection(db, 'employee_scores');
     if (!isConsolidated) {
-      scoresQuery = scoresQuery.eq('period', period);
+      scoresFirestoreQuery = query(scoresFirestoreQuery, where('period', '==', period));
     }
 
+    // Firebase queries
     const [criteriaResult, scoresResult, employeesResult, previousRankingsResult] = await Promise.all([
-      supabase.from('evaluation_criteria').select('*').eq('active', true).order('display_order'),
-      scoresQuery,
-      supabase.from('employees').select('*').eq('active', true),
-      isConsolidated ? Promise.resolve({ data: [], error: null }) : supabase.from('employee_rankings').select('*').eq('period', previousMonth),
+      getDocs(query(collection(db, 'evaluation_criteria'), where('active', '==', true))),
+      getDocs(scoresFirestoreQuery),
+      getDocs(query(collection(db, 'employees'), where('active', '==', true))),
+      isConsolidated
+        ? Promise.resolve({ docs: [] }) as Promise<any> // Mock empty snapshot for consolidated
+        : getDocs(query(collection(db, 'employee_rankings'), where('period', '==', previousMonth))),
     ]);
 
-    if (criteriaResult.error) throw criteriaResult.error;
-    if (scoresResult.error) throw scoresResult.error;
-    if (employeesResult.error) throw employeesResult.error;
-
-    const criteria = criteriaResult.data;
-    let scores = scoresResult.data || [];
-    const employees = employeesResult.data;
-    const previousRankings = previousRankingsResult.data || [];
+    const criteria = (criteriaResult.docs.map(doc => ({ id: doc.id, ...doc.data() })) as EvaluationCriteria[])
+      .sort((a, b) => (a.display_order || 0) - (b.display_order || 0));
+      
+    let scores = scoresResult.docs.map(doc => ({ id: doc.id, ...doc.data() })) as EmployeeScore[];
+    const employees = employeesResult.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Employee[];
+    const previousRankings = previousRankingsResult.docs.map(doc => ({ id: doc.id, ...doc.data() })) as RankingResult[];
 
     if (!criteria || criteria.length === 0) {
       console.warn('Nenhum critério ativo encontrado');
       return [];
+    }
+
+    // Para o caso consolidado, precisamos buscar todos os scores e filtrar pelo período
+    if (isConsolidated) {
+      const allScoresSnapshot = await getDocs(collection(db, 'employee_scores'));
+      scores = allScoresSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as EmployeeScore[];
     }
 
     if (!employees || employees.length === 0) {
@@ -86,12 +105,18 @@ export async function calculateIntelligentRanking(period: string, useCache: bool
       return [];
     }
 
+    // Filtrar scores para o período atual se não for consolidado
+    if (!isConsolidated) {
+      scores = scores.filter(s => s.period === period);
+    }
+
+
     const totalWeight = criteria.reduce((sum, c) => sum + c.weight, 0);
     if (Math.abs(totalWeight - 100) > 0.01) {
       console.warn(`Soma dos pesos: ${totalWeight}% (esperado: 100%)`);
     }
 
-    let normalizedScores: Array<{ employee_id: string; criterion_id: string; raw_value: number; normalized_score: number }>;
+    let normalizedScores: Array<{ docId: string | null; employee_id: string; criterion_id: string; raw_value: number; normalized_score: number }>;
 
     if (isConsolidated) {
       const scoreGroups = new Map<string, { raw_values: number[], normalized_scores: number[], employee_id: string, criterion_id: string }>();
@@ -112,17 +137,17 @@ export async function calculateIntelligentRanking(period: string, useCache: bool
         const sumNormalizedScore = data.normalized_scores.reduce((a, b) => a + b, 0);
         
         return {
+          docId: null, // Not applicable for consolidated view
           employee_id: data.employee_id,
           criterion_id: data.criterion_id,
           raw_value: sumRawValue,
           normalized_score: sumNormalizedScore,
         };
       });
-      console.log('Aggregated & Summed Normalized Scores:', normalizedScores);
 
     } else {
       normalizedScores = normalizeAllScores(criteria, scores, employees);
-      await updateNormalizedScores(normalizedScores, period);
+      await updateNormalizedScores(normalizedScores);
     }
 
     const rankings: RankingResult[] = employees.map(employee => {
@@ -167,17 +192,13 @@ export async function calculateIntelligentRanking(period: string, useCache: bool
       };
     });
 
-    if (isConsolidated) {
-      console.log('Final Rankings:', rankings);
-    }
-
     rankings.sort((a, b) => b.total_score - a.total_score);
 
     rankings.forEach((ranking, index) => {
       ranking.rank_position = index + 1;
 
       if (!isConsolidated && previousRankings && previousRankings.length > 0) {
-        const prevRank = previousRankings.find(pr => pr.employee_id === ranking.employee_id);
+        const prevRank = previousRankings.find(pr => pr.employee_id === ranking.employee_id && pr.period === previousMonth);
         if (prevRank) {
           ranking.previous_rank = prevRank.rank_position;
           ranking.rank_variation = prevRank.rank_position - ranking.rank_position;
@@ -201,8 +222,8 @@ function normalizeAllScores(
   criteria: EvaluationCriteria[],
   scores: EmployeeScore[],
   employees: Employee[]
-): Array<{ employee_id: string; criterion_id: string; raw_value: number; normalized_score: number }> {
-  const normalized: Array<{ employee_id: string; criterion_id: string; raw_value: number; normalized_score: number }> = [];
+): Array<{ docId: string | null; employee_id: string; criterion_id: string; raw_value: number; normalized_score: number }> {
+  const normalized: Array<{ docId: string | null; employee_id: string; criterion_id: string; raw_value: number; normalized_score: number }> = [];
 
   for (const criterion of criteria) {
     const criterionScores = scores.filter(s => s.criterion_id === criterion.id);
@@ -210,6 +231,7 @@ function normalizeAllScores(
     if (criterionScores.length === 0) {
       employees.forEach(emp => {
         normalized.push({
+          docId: null,
           employee_id: emp.id,
           criterion_id: criterion.id,
           raw_value: 0,
@@ -240,6 +262,7 @@ function normalizeAllScores(
       normalizedScore = Math.max(0, Math.min(100, normalizedScore));
 
       normalized.push({
+        docId: score.id,
         employee_id: score.employee_id,
         criterion_id: criterion.id,
         raw_value: score.raw_value,
@@ -251,6 +274,7 @@ function normalizeAllScores(
       const hasScore = criterionScores.some(s => s.employee_id === emp.id);
       if (!hasScore) {
         normalized.push({
+          docId: null,
           employee_id: emp.id,
           criterion_id: criterion.id,
           raw_value: 0,
@@ -305,24 +329,17 @@ function generateSuggestion(criterion: EvaluationCriteria): string {
 }
 
 async function updateNormalizedScores(
-  normalizedScores: Array<{ employee_id: string; criterion_id: string; raw_value: number; normalized_score: number }>,
-  period: string
+  normalizedScores: Array<{ docId: string | null; employee_id: string; criterion_id: string; raw_value: number; normalized_score: number }>
 ): Promise<void> {
-  const updates = normalizedScores.map(score =>
-    supabase
-      .from('employee_scores')
-      .update({ normalized_score: score.normalized_score })
-      .eq('employee_id', score.employee_id)
-      .eq('criterion_id', score.criterion_id)
-      .eq('period', period)
-  );
-
-  const results = await Promise.all(updates);
-
-  const errors = results.filter(r => r.error);
-  if (errors.length > 0) {
-    console.warn(`${errors.length} erros ao atualizar scores normalizados`);
+  const batch = writeBatch(db);
+  for (const score of normalizedScores) {
+    // Apenas atualiza se o docId existir (ou seja, o score já existia no banco)
+    if (score.docId) {
+      const docRef = doc(db, 'employee_scores', score.docId);
+      batch.update(docRef, { normalized_score: score.normalized_score });
+    }
   }
+  await batch.commit();
 }
 
 async function saveRankings(rankings: RankingResult[], period: string): Promise<void> {
@@ -334,32 +351,36 @@ async function saveRankings(rankings: RankingResult[], period: string): Promise<
     total_score: r.total_score,
     rank_position: r.rank_position,
     department: r.department,
+    criterion_scores: r.criterion_scores,
+    strengths: r.strengths,
+    weaknesses: r.weaknesses,
+    suggestions: r.suggestions,
   }));
 
-  const { error } = await supabase
-    .from('employee_rankings')
-    .upsert(rankingUpserts, {
-      onConflict: 'employee_id,period'
-    });
-
-  if (error) throw error;
+  const batch = writeBatch(db);
+  for (const ranking of rankingUpserts) {
+    const docId = `${ranking.employee_id}_${period}`;
+    const docRef = doc(db, 'employee_rankings', docId);
+    batch.set(docRef, ranking, { merge: true });
+  }
+  await batch.commit();
 }
 
 function getPreviousMonth(period: string): string {
-  const date = new Date(period);
-  date.setMonth(date.getMonth() - 1);
-  return date.toISOString().split('T')[0].slice(0, 10);
+  // Assume period is in 'YYYY-MM-DD' format (e.g., '2025-01-01')
+  const [year, month] = period.split('-').map(Number);
+  const prevMonthDate = new Date(year, month - 2, 1); // month - 2 because month is 1-indexed, and we want previous
+  return format(prevMonthDate, 'yyyy-MM-dd');
 }
 
 export async function recalculateAllRankingsEngine(): Promise<void> {
-  const { data: periods } = await supabase
-    .from('employee_scores')
-    .select('period')
-    .order('period', { ascending: false });
-
-  if (!periods) return;
-
-  const uniquePeriods = [...new Set(periods.map(p => p.period))];
+  const scoresSnapshot = await getDocs(query(collection(db, 'employee_scores'), orderBy('period', 'desc'))); // Order by period to get latest first
+  const allPeriods = scoresSnapshot.docs.map(doc => doc.data().period as string);
+  if (!allPeriods || allPeriods.length === 0) {
+    console.warn('Nenhum score encontrado para recalcular períodos.');
+    return;
+  }
+  const uniquePeriods = [...new Set(allPeriods)];
 
   for (const period of uniquePeriods) {
     await calculateIntelligentRanking(period);
@@ -371,22 +392,14 @@ export async function generatePerformanceData(period: string): Promise<void> {
     throw new Error('Período é obrigatório para gerar dados de performance');
   }
 
-  const { data: criteria, error: criteriaError } = await supabase
-    .from('evaluation_criteria')
-    .select('*')
-    .eq('active', true);
-
-  if (criteriaError) throw criteriaError;
+  const criteriaSnapshot = await getDocs(query(collection(db, 'evaluation_criteria'), where('active', '==', true)));
+  const criteria = criteriaSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as EvaluationCriteria[];
   if (!criteria || criteria.length === 0) {
     throw new Error('Nenhum critério de avaliação encontrado');
   }
 
-  const { data: employees, error: employeesError } = await supabase
-    .from('employees')
-    .select('*')
-    .eq('active', true);
-
-  if (employeesError) throw employeesError;
+  const employeesSnapshot = await getDocs(query(collection(db, 'employees'), where('active', '==', true)));
+  const employees = employeesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Employee[];
   if (!employees || employees.length === 0) {
     throw new Error('Nenhum colaborador encontrado');
   }
@@ -401,13 +414,14 @@ export async function generatePerformanceData(period: string): Promise<void> {
 
   for (const employee of employees) {
     for (const criterion of criteria) {
-      const { data: existingScore } = await supabase
-        .from('employee_scores')
-        .select('*')
-        .eq('employee_id', employee.id)
-        .eq('criterion_id', criterion.id)
-        .eq('period', period)
-        .maybeSingle();
+      const q = query(
+        collection(db, 'employee_scores'),
+        where('employee_id', '==', employee.id),
+        where('criterion_id', '==', criterion.id),
+        where('period', '==', period)
+      );
+      const existingScoreSnapshot = await getDocs(q); // Check for existing score
+      const existingScore = !existingScoreSnapshot.empty;
 
       if (!existingScore) {
         let rawValue = 0;
@@ -445,11 +459,12 @@ export async function generatePerformanceData(period: string): Promise<void> {
   if (scoresToInsert.length > 0) {
     console.log(`Gerando ${scoresToInsert.length} novos registros de performance (mantendo dados existentes)`);
 
-    const { error: insertError } = await supabase
-      .from('employee_scores')
-      .insert(scoresToInsert);
-
-    if (insertError) throw insertError;
+    const batch = writeBatch(db);
+    scoresToInsert.forEach(score => {
+      const docRef = doc(collection(db, 'employee_scores')); // Let Firestore generate ID
+      batch.set(docRef, score);
+    });
+    await batch.commit();
   }
 
   await calculateIntelligentRanking(period);
@@ -468,12 +483,9 @@ export async function generateHistoricalData(): Promise<void> {
   for (const month of months) {
     console.log(`Gerando dados para ${month}...`);
 
-    const { data: existingScores } = await supabase
-      .from('employee_scores')
-      .select('id')
-      .eq('period', month)
-      .limit(1);
-
+    const q = query(collection(db, 'employee_scores'), where('period', '==', month));
+    const existingScoresSnapshot = await getDocs(q);
+    const existingScores = !existingScoresSnapshot.empty;
     if (!existingScores || existingScores.length === 0) {
       await generatePerformanceData(month);
       console.log(`✅ Dados gerados para ${month}`);

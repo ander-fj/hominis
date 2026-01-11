@@ -1,26 +1,31 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Trophy, Download, Filter, TrendingUp, TrendingDown, FileText, Info, CheckCircle2, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react';
 // Removed framer-motion to fix DOM errors
+import { collection, getDocs, query, where, orderBy, onSnapshot } from 'firebase/firestore';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar, Legend, LabelList } from 'recharts';
 import MRSCard from './MRSCard';
 import { calculateIntelligentRanking, RankingResult, generatePerformanceData } from '../../lib/rankingEngine';
 import { formatNumber, getCurrentMonth } from '../../lib/format';
-import { getMedalEmoji, getMedalColor } from '../../lib/theme';
-import { exportRankingToPDF, exportRankingToXLSX } from '../../lib/exportUtils';
-import { supabase } from '../../lib/supabase';
-import { Database } from '../../lib/database.types';
-import { useAvailablePeriods } from '../../lib/usePeriods';
-import { useAutoRecalculate } from '../../lib/useAutoRecalculate';
+import { getMedalEmoji, getMedalColor } from '../../lib/theme'; // Presuming theme is independent
+import { exportRankingToPDF, exportRankingToXLSX } from '../../lib/exportUtils'; // Presuming export is independent
 import html2canvas from 'html2canvas';
+import { db } from '../../lib/firebase';
 import jsPDF from 'jspdf';
 
-type EvaluationCriteria = Database['public']['Tables']['evaluation_criteria']['Row'];
+interface EvaluationCriteria {
+  id: string;
+  name: string;
+  description: string;
+  weight: number;
+  direction: 'higher_better' | 'lower_better';
+  display_order: number;
+  active: boolean;
+}
 
 export default function RankingInteligente() {
   const [rankings, setRankings] = useState<RankingResult[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useAutoRecalculate(true, 10000);
   const [refreshing, setRefreshing] = useState(false);
   const [selectedPeriod, setSelectedPeriod] = useState('');
   const [selectedDepartment, setSelectedDepartment] = useState<string>('all');
@@ -34,63 +39,83 @@ export default function RankingInteligente() {
     total_score: number;
   }>>([]);
 
-  const { periods: availablePeriods } = useAvailablePeriods();
+  const [availablePeriods, setAvailablePeriods] = useState<{ value: string; label: string }[]>([]);
 
   useEffect(() => {
-    let isMounted = true;
+    let unsubscribeRankings: () => void;
 
     const loadData = async () => {
-      setRankings([]);
       setLoading(true);
+      try {
+        // 1. Carregar Critérios de Avaliação
+        const criteriaQuery = query(collection(db, 'evaluation_criteria'), where('active', '==', true));
+        const criteriaSnapshot = await getDocs(criteriaQuery);
+        const criteriaData = (criteriaSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as EvaluationCriteria[])
+          .sort((a, b) => a.display_order - b.display_order);
+        setCriteria(criteriaData);
 
-      await new Promise(resolve => setTimeout(resolve, 100));
+        // Fetch available periods from rankings
+        const periodsQuery = query(collection(db, 'employee_rankings'), orderBy('period', 'desc'));
+        const periodsSnapshot = await getDocs(periodsQuery);
+        const periods = [...new Set(periodsSnapshot.docs.map(doc => doc.data().period as string))]
+          .filter(p => p !== 'consolidated'); // Remove 'consolidated' from the list
+        
+        const periodOptions = periods.map(p => ({
+          value: p,
+          // Simple date formatting, can be improved with date-fns if needed
+          label: new Date(p + 'T00:00:00').toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
+        }));
+        setAvailablePeriods(periodOptions);
 
-      if (isMounted) {
-        try {
-          let results: RankingResult[];
-          const periodToLoad = !selectedPeriod || selectedPeriod === '' ? 'consolidated' : selectedPeriod;
+        // 2. Carregar Rankings
+        const periodToLoad = !selectedPeriod || selectedPeriod === '' ? 'consolidated' : selectedPeriod;
+        const rankingsQuery = query(collection(db, 'employee_rankings'), where('period', '==', periodToLoad));
+        
+        unsubscribeRankings = onSnapshot(rankingsQuery, async (snapshot) => {
+          let results: RankingResult[] = snapshot.docs.map(doc => doc.data() as RankingResult);
 
-          console.log(`Carregando rankings para o período: ${periodToLoad}`);
-          results = await calculateIntelligentRanking(periodToLoad, true);
-          console.log(`Rankings para '${periodToLoad}' carregados:`, results.length);
-
-          if (isMounted) {
-            setRankings(results);
-
-            const depts = [...new Set(results.map(r => r.department))];
-            setDepartments(depts);
-
-            if (criteria.length === 0) {
-              const { data, error } = await supabase
-                .from('evaluation_criteria')
-                .select('*')
-                .eq('active', true)
-                .order('display_order');
-
-              if (!error && data && isMounted) {
-                setCriteria(data);
+          // Fallback para cálculo local se não houver rankings pré-calculados
+          if (results.length === 0) {
+            console.warn(`Nenhum ranking pré-calculado encontrado para o período '${periodToLoad}'. Calculando localmente...`);
+            try {
+              const calculated = await calculateIntelligentRanking(periodToLoad, true);
+              // Se for consolidado ou se o listener não disparar, usamos o resultado calculado
+              if (periodToLoad === 'consolidated' || calculated.length > 0) {
+                results = calculated;
               }
+            } catch (error) {
+              console.error("Erro ao calcular ranking automaticamente:", error);
             }
           }
-        } catch (error) {
-          console.error('Erro ao carregar rankings:', error);
-        } finally {
-          if (isMounted) {
-            setLoading(false);
-          }
-        }
+
+          // Ordenar por pontuação
+          results.sort((a, b) => b.total_score - a.total_score);
+
+          setRankings(results);
+
+          // 3. Extrair Departamentos
+          const depts = [...new Set(results.map(r => r.department))];
+          setDepartments(depts);
+          setLoading(false);
+        });
+
+      } catch (error) {
+        console.error("Erro ao carregar dados do Firestore:", error);
+        // Opcional: Adicionar estado de erro para exibir na UI
       }
     };
 
     loadData();
 
     return () => {
-      isMounted = false;
+      if (unsubscribeRankings) unsubscribeRankings();
     };
-  }, [selectedPeriod]);
+  }, [selectedPeriod, selectedDepartment]);
 
   useEffect(() => {
     if (selectedEmployee) {
+      // A lógica de carregamento de dados foi desativada temporariamente
+      // para remover a dependência do Supabase.
       loadEmployeeHistory(selectedEmployee.employee_id);
     }
   }, [selectedEmployee]);
@@ -142,43 +167,23 @@ export default function RankingInteligente() {
   };
 
   const loadRankingsOnly = async () => {
-    setLoading(true);
-    try {
-      await loadRankings();
-    } catch (error) {
-      console.error('Erro ao carregar rankings:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Erro desconhecido';
-      alert(`Erro ao carregar rankings: ${errorMessage}`);
-    } finally {
-      setLoading(false);
-    }
+    // TODO: Implementar a lógica de carregamento de dados usando o Firebase Firestore.
   };
 
   const initializeRankings = async () => {
-    setLoading(true);
-    try {
-      await generatePerformanceData(selectedPeriod);
-      await loadRankings();
-    } catch (error) {
-      console.error('Erro ao inicializar rankings:', error);
-      await loadRankings();
-    } finally {
-      setLoading(false);
-    }
+    // TODO: Implementar a lógica de carregamento de dados usando o Firebase Firestore.
   };
 
   const loadEmployeeHistory = async (employeeId: string) => {
     try {
-      const { data, error } = await supabase
-        .from('employee_rankings')
-        .select('period, rank_position, total_score')
-        .eq('employee_id', employeeId)
-        .order('period', { ascending: true });
-
-      if (error) throw error;
-      if (data) {
-        setEmployeeHistory(data);
-      }
+      const historyQuery = query(
+        collection(db, 'employee_rankings'),
+        where('employee_id', '==', employeeId),
+      );
+      const historySnapshot = await getDocs(historyQuery);
+      const historyData = historySnapshot.docs.map(doc => doc.data() as { period: string; rank_position: number; total_score: number })
+        .sort((a, b) => a.period.localeCompare(b.period));
+      setEmployeeHistory(historyData);
     } catch (error) {
       console.error('Erro ao carregar histórico do colaborador:', error);
       setEmployeeHistory([]);
@@ -186,118 +191,64 @@ export default function RankingInteligente() {
   };
 
   const loadCriteria = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('evaluation_criteria')
-        .select('*')
-        .eq('active', true)
-        .order('display_order');
-
-      if (error) throw error;
-      if (data) setCriteria(data);
-    } catch (error) {
-      console.error('Erro ao carregar critérios:', error);
-    }
+    const criteriaQuery = query(collection(db, 'evaluation_criteria'), where('active', '==', true));
+    const criteriaSnapshot = await getDocs(criteriaQuery);
+    const criteriaData = (criteriaSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as EvaluationCriteria[])
+      .sort((a, b) => a.display_order - b.display_order);
+    setCriteria(criteriaData);
   };
 
   const loadEmployeeDetails = async (ranking: RankingResult) => {
-    // Abrir modal IMEDIATAMENTE com loading
+    // Abre o modal imediatamente com os dados básicos
     setSelectedEmployee(ranking);
 
     try {
-      // Buscar critérios (cache local se já tiver)
+      // Garante que os critérios estejam carregados
       let criteriaData = criteria;
       if (criteriaData.length === 0) {
-        const criteriaResult = await supabase
-          .from('evaluation_criteria')
-          .select('*')
-          .eq('active', true)
-          .order('display_order');
-
-        if (criteriaResult.error) throw criteriaResult.error;
-        criteriaData = criteriaResult.data || [];
+        const criteriaQuery = query(collection(db, 'evaluation_criteria'), where('active', '==', true));
+        const criteriaSnapshot = await getDocs(criteriaQuery);
+        criteriaData = (criteriaSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as EvaluationCriteria[])
+          .sort((a, b) => a.display_order - b.display_order);
         setCriteria(criteriaData);
       }
 
-      // Buscar dados do employee_ranking que já tem criterion_details
-      const { data: rankingData, error: rankingError } = await supabase
-        .from('employee_rankings')
-        .select('criterion_details')
-        .eq('employee_id', ranking.employee_id)
-        .eq('period', selectedPeriod === 'all' ? 'consolidated' : selectedPeriod)
-        .maybeSingle();
+      // Busca os detalhes do ranking do colaborador no período correto
+      const periodToLoad = !selectedPeriod || selectedPeriod === '' ? 'consolidated' : selectedPeriod;
+      const rankingDetailsQuery = query(
+        collection(db, 'employee_rankings'),
+        where('employee_id', '==', ranking.employee_id)
+      );
+      const rankingDetailsSnapshot = await getDocs(rankingDetailsQuery);
 
-      if (rankingError) throw rankingError;
+      const rankingDetailsDoc = rankingDetailsSnapshot.docs.find(doc => doc.data().period === periodToLoad);
 
-      let criterionScores;
-
-      if (rankingData && rankingData.criterion_details) {
-        // Usar dados já processados do ranking
-        const details = rankingData.criterion_details as any;
-        criterionScores = criteriaData.map(criterion => ({
-          criterion_id: criterion.id,
-          criterion_name: criterion.name,
-          raw_value: details[criterion.id]?.raw_value || 0,
-          normalized_score: details[criterion.id]?.normalized_score || 0,
-          weight: criterion.weight,
-          weighted_score: details[criterion.id]?.weighted_score || 0
-        }));
-      } else {
-        // Fallback: criar scores vazios
-        criterionScores = criteriaData.map(criterion => ({
-          criterion_id: criterion.id,
-          criterion_name: criterion.name,
-          raw_value: 0,
-          normalized_score: 0,
-          weight: criterion.weight,
-          weighted_score: 0
-        }));
+      if (!rankingDetailsDoc) {
+        throw new Error("Detalhes do ranking não encontrados para este colaborador no período.");
       }
 
-      const strengths = criterionScores
-        .filter(cs => cs.normalized_score >= 80)
-        .map(cs => `${cs.criterion_name}: ${cs.normalized_score.toFixed(1)}%`);
+      const rankingDetails = rankingDetailsDoc.data() as RankingResult;
 
-      const suggestions = criterionScores
-        .filter(cs => cs.normalized_score < 60)
-        .map(cs => `Melhorar ${cs.criterion_name} (atual: ${cs.normalized_score.toFixed(1)}%)`);
+      const strengths = (rankingDetails.strengths || []).length > 0 ? rankingDetails.strengths : ['Performance estável'];
+      const suggestions = (rankingDetails.suggestions || []).length > 0 ? rankingDetails.suggestions : ['Manter o bom desempenho'];
 
       const enrichedRanking = {
-        ...ranking,
-        criterion_scores: criterionScores,
-        strengths: strengths.length > 0 ? strengths : ['Colaborador tem performance estável'],
-        suggestions: suggestions.length > 0 ? suggestions : ['Manter o bom desempenho atual']
+        ...rankingDetails,
+        strengths,
+        suggestions,
       };
 
       setSelectedEmployee(enrichedRanking);
+
     } catch (error) {
-      console.error('❌ Erro ao carregar detalhes:', error);
-      setSelectedEmployee({
-        ...ranking,
-        criterion_scores: [],
-        strengths: ['Erro ao carregar dados'],
-        suggestions: ['Tente novamente']
-      });
+      console.error('❌ Erro ao carregar detalhes do colaborador:', error);
+      // Mantém o modal aberto, mas com uma mensagem de erro
+      setSelectedEmployee({ ...ranking, strengths: ['Erro ao carregar dados.'], suggestions: ['Tente novamente.'] });
     }
   };
 
   const loadRankings = async () => {
-    try {
-      console.log('Carregando rankings para período:', selectedPeriod);
-      const results = await calculateIntelligentRanking(selectedPeriod, true);
-      console.log('Rankings carregados:', results.length);
-      setRankings(results);
-
-      const depts = [...new Set(results.map(r => r.department))];
-      setDepartments(depts);
-
-      if (criteria.length === 0) {
-        await loadCriteria();
-      }
-    } catch (error) {
-      console.error('Erro ao carregar rankings:', error);
-      throw error;
-    }
+    // TODO: Implementar a lógica de carregamento de dados usando o Firebase Firestore.
   };
 
   const handleRefresh = async () => {
@@ -364,7 +315,8 @@ export default function RankingInteligente() {
     return filteredRankings.map(employee => {
       const employeeData: { [key: string]: any } = { employee_name: employee.employee_name, total_score: employee.total_score };
       criteria.forEach(criterion => {
-        employeeData[criterion.name] = employee.criterion_scores.find(cs => cs.criterion_id === criterion.id)?.weighted_score || 0;
+        const scores = employee.criterion_scores || [];
+        employeeData[criterion.name] = scores.find(cs => cs.criterion_id === criterion.id)?.weighted_score || 0;
       });
       return employeeData;
     }).sort((a, b) => b.total_score - a.total_score);

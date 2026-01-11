@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { Calendar } from 'lucide-react';
-import { useAvailablePeriods } from '../../lib/usePeriods';
 
 interface PeriodFilterProps {
   selectedPeriod: string;
@@ -8,6 +7,8 @@ interface PeriodFilterProps {
   label?: string;
   showConsolidated?: boolean;
   onCustomRangeChange?: (startDate: string, endDate: string) => void;
+  periods?: { value: string; label: string }[];
+  loading?: boolean;
 }
 
 export default function PeriodFilter({
@@ -15,9 +16,10 @@ export default function PeriodFilter({
   onPeriodChange,
   label = 'Período',
   showConsolidated = true,
-  onCustomRangeChange
+  onCustomRangeChange,
+  periods = [],
+  loading = false,
 }: PeriodFilterProps) {
-  const { periods, loading } = useAvailablePeriods();
   const [showCustomRange, setShowCustomRange] = useState(false);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');

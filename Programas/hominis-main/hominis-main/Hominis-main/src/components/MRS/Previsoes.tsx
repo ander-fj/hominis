@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react';
 import { TrendingUp, TrendingDown, AlertTriangle, Target, Calendar, Activity, BarChart3, LineChart as LineChartIcon, ArrowUpRight, ArrowDownRight, Minus, ChevronDown, ChevronUp, Download } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine, Area, AreaChart, Label } from 'recharts';
 import MRSCard from './MRSCard';
-import MRSStatCard from './MRSStatCard';
-import { supabase } from '../../lib/supabase';
+import { collection, getDocs, query, where, updateDoc, doc } from 'firebase/firestore';
 import { format, subMonths, startOfMonth, endOfMonth } from 'date-fns';
+import { db } from '../../lib/firebase';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 
@@ -97,16 +97,15 @@ export default function Previsoes() {
 
   const loadGoals = async () => {
     try {
-      const { data, error } = await supabase
-        .from('sst_goals')
-        .select('*');
+      const goalsSnapshot = await getDocs(collection(db, 'sst_goals'));
 
-      if (error) throw error;
+      if (!goalsSnapshot.empty) {
+        const goalsData = goalsSnapshot.docs.map(doc => doc.data());
+        const goalsMap: Partial<SSTGoals> = {
+          // Default values can be set here if needed
+        };
 
-      if (data) {
-        const goalsMap: Partial<SSTGoals> = {};
-
-        data.forEach((goal) => {
+        goalsData.forEach((goal) => {
           if (goal.goal_type in { conformidade: 0, incidentes: 0, treinamentos: 0, epis: 0 }) {
             goalsMap[goal.goal_type as keyof SSTGoals] = goal.goal_value;
           }
@@ -127,14 +126,18 @@ export default function Previsoes() {
     setGoals(prev => ({ ...prev, [goalType]: value }));
 
     try {
-      const { error } = await supabase
-        .from('sst_goals')
-        .update({ goal_value: value, updated_at: new Date().toISOString() })
-        .eq('goal_type', goalType);
+      const q = query(collection(db, 'sst_goals'), where('goal_type', '==', goalType));
+      const querySnapshot = await getDocs(q);
 
-      if (error) {
-        console.error(`Erro ao salvar meta de ${goalType}:`, error);
-        // Optionally, revert UI change or show an error toast
+      if (!querySnapshot.empty) {
+        const goalDocRef = querySnapshot.docs[0].ref;
+        await updateDoc(goalDocRef, {
+          goal_value: value,
+          updated_at: new Date().toISOString()
+        });
+      } else {
+        console.warn(`Meta para '${goalType}' não encontrada para atualização.`);
+        // Optionally create the goal if it doesn't exist
       }
     } catch (error) {
       console.error(`Erro ao salvar meta de ${goalType}:`, error);
@@ -145,64 +148,64 @@ export default function Previsoes() {
     try {
       setLoading(true);
 
-      // Últimos 6 meses
-      const months = Array.from({ length: 6 }, (_, i) => {
-        const date = subMonths(new Date(), 5 - i);
-        return {
-          start: startOfMonth(date).toISOString().split('T')[0],
-          end: endOfMonth(date).toISOString().split('T')[0],
-          label: format(date, 'MMM')
-        };
-      });
+      const now = new Date();
+      const sixMonthsAgo = startOfMonth(subMonths(now, 5));
+      const sixMonthsAgoISO = sixMonthsAgo.toISOString().split('T')[0];
 
-      const metricsPromises = months.map(async (month) => {
-        // Treinamentos concluídos
-        const { count: trainingsCount } = await supabase
-          .from('sst_trainings')
-          .select('*', { count: 'exact', head: true })
-          .gte('completion_date', month.start)
-          .lte('completion_date', month.end)
-          .eq('status', 'valid');
+      // 1. Fetch all data in parallel for the last 6 months
+      const [
+        trainingsSnapshot,
+        incidentsSnapshot,
+        examsSnapshot,
+        employeesSnapshot
+      ] = await Promise.all([
+        getDocs(query(collection(db, 'sst_trainings'), where('completion_date', '>=', sixMonthsAgoISO), where('status', '==', 'valid'))),
+        getDocs(query(collection(db, 'sst_incidents'), where('incident_date', '>=', sixMonthsAgoISO))),
+        getDocs(query(collection(db, 'sst_medical_exams'), where('exam_date', '>=', sixMonthsAgoISO))),
+        getDocs(query(collection(db, 'employees'), where('active', '==', true)))
+      ]);
 
-        // Incidentes
-        const { count: incidentsCount } = await supabase
-          .from('sst_incidents')
-          .select('*', { count: 'exact', head: true })
-          .gte('incident_date', month.start)
-          .lte('incident_date', month.end);
+      const allTrainings = trainingsSnapshot.docs.map(doc => doc.data());
+      const allIncidents = incidentsSnapshot.docs.map(doc => doc.data());
+      const allExams = examsSnapshot.docs.map(doc => doc.data());
+      const totalEmployees = employeesSnapshot.size;
 
-        // Exames realizados
-        const { count: examsCount } = await supabase
-          .from('sst_medical_exams')
-          .select('*', { count: 'exact', head: true })
-          .gte('exam_date', month.start)
-          .lte('exam_date', month.end);
+      // 2. Process data month by month
+      const months = Array.from({ length: 6 }, (_, i) => subMonths(now, 5 - i));
+      const metrics: MonthlyMetrics[] = [];
 
-        // Taxa de conformidade (simplificada)
-        const { count: totalEmployees } = await supabase
-          .from('employees')
-          .select('*', { count: 'exact', head: true });
+      for (const date of months) {
+        const monthLabel = format(date, 'MMM');
+        const monthStart = startOfMonth(date);
+        const monthEnd = endOfMonth(date);
 
-        const { count: upToDateExams } = await supabase
-          .from('sst_medical_exams')
-          .select('*', { count: 'exact', head: true })
-          .lte('exam_date', month.end)
-          .eq('status', 'valid');
+        const trainingsCount = allTrainings.filter(t => {
+          const completionDate = new Date(t.completion_date);
+          return completionDate >= monthStart && completionDate <= monthEnd;
+        }).length;
 
-        const conformity = totalEmployees && totalEmployees > 0
-          ? ((upToDateExams || 0) / totalEmployees) * 100
-          : 0;
+        const incidentsCount = allIncidents.filter(i => {
+          const incidentDate = new Date(i.incident_date);
+          return incidentDate >= monthStart && incidentDate <= monthEnd;
+        }).length;
 
-        return {
-          month: month.label,
+        const examsCount = allExams.filter(e => {
+          const examDate = new Date(e.exam_date);
+          return examDate >= monthStart && examDate <= monthEnd;
+        }).length;
+
+        const upToDateExams = allExams.filter(e => new Date(e.exam_date) <= monthEnd && e.status === 'valid').length;
+        const conformity = totalEmployees > 0 ? (upToDateExams / totalEmployees) * 100 : 0;
+
+        metrics.push({
+          month: monthLabel,
           trainings: trainingsCount || 0,
           incidents: incidentsCount || 0,
           exams: examsCount || 0,
           conformity: Math.round(conformity)
-        };
-      });
+        });
+      }
 
-      const metrics = await Promise.all(metricsPromises);
       setHistoricalData(metrics);
 
       // Calcular previsões baseadas nos dados históricos

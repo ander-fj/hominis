@@ -1,0 +1,34 @@
+{
+  "metricasFuncionario": {
+    "tempoDeCasa": {
+      "valorExibido": "3 anos e 0 meses",
+      "dataInicio": "2022-11-30"
+    },
+    "frequencia": {
+      "faltas": {
+        "contagem": 0,
+        "rotulo": "Total registrado"
+      },
+      "atrasos": {
+        "contagem": 0,
+        "rotulo": "Total registrado"
+      }
+    },
+    "desenvolvimento": {
+      "treinamentos": 0,
+      "conUSs": null
+    },
+    "performance": {
+      "graficoRadar": {
+        "eixo": [
+          0,
+          25,
+          50,
+          75,
+          100
+        ],
+        "rotulo": "Pontos por Critério"
+      }
+    }
+  }
+}

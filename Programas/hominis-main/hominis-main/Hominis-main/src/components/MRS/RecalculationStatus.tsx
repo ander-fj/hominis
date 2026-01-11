@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { RefreshCw, CheckCircle, XCircle, Clock, Play, User } from 'lucide-react';
-import { supabase } from '../../lib/supabase';
+import { collection, getDocs, query, orderBy } from 'firebase/firestore';
+import { db } from '../../lib/firebase';
 
 interface QueueItem {
   period: string;
@@ -32,13 +33,14 @@ export default function RecalculationStatus() {
 
   const loadQueue = async () => {
     try {
-      const { data } = await supabase
-        .from('ranking_recalculation_queue')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(20);
+      const queueQuery = query(
+        collection(db, 'ranking_recalculation_queue'),
+        orderBy('created_at', 'desc'),
+      );
+      const querySnapshot = await getDocs(queueQuery);
 
-      if (data) {
+      if (!querySnapshot.empty) {
+        const data = querySnapshot.docs.map(doc => doc.data()) as QueueItem[];
         setQueue(data);
       }
     } catch (error) {
@@ -51,33 +53,12 @@ export default function RecalculationStatus() {
   const processPendingItems = async () => {
     setProcessing(true);
     try {
-      const pendingItems = queue.filter(q => q.status === 'pending');
-
-      for (const item of pendingItems) {
-        await supabase
-          .from('ranking_recalculation_queue')
-          .update({ status: 'processing' })
-          .eq('period', item.period)
-          .eq('status', 'pending');
-
-        await supabase.rpc('recalculate_rankings_for_period', {
-          target_period: item.period
-        });
-
-        await supabase
-          .from('ranking_recalculation_queue')
-          .update({
-            status: 'completed',
-            processed_at: new Date().toISOString()
-          })
-          .eq('period', item.period);
-      }
-
+      // This logic should be moved to a Firebase Cloud Function for security and reliability.
+      // The button will now just inform the user.
+      alert('O recálculo é um processo de backend e será iniciado automaticamente.');
       await loadQueue();
-      alert('Recálculo concluído com sucesso!');
     } catch (error) {
       console.error('Erro ao processar pendentes:', error);
-      alert('Erro ao processar recálculos. Verifique o console para detalhes.');
     } finally {
       setProcessing(false);
     }
