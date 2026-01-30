@@ -169,3 +169,4 @@ O sistema utiliza um algoritmo inteligente de normalização e ponderação:
 ## Suporte
 
 Sistema desenvolvido com foco em usabilidade, escalabilidade e segurança de dados.
+Projeto Hominis
