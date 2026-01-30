@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Users, UserPlus, Search, Mail, Briefcase, Calendar, Edit2, Trash2, Download, Upload, FileSpreadsheet, AlertCircle, X, Clock, Award, Shield, Activity, AlertTriangle, TrendingUp, MessageSquare, Send, CheckCircle2, ChevronDown, Maximize2, Minimize2, Info } from 'lucide-react';
+import { Users, UserPlus, Search, Mail, Briefcase, Calendar, Edit2, Trash2, Download, Upload, FileSpreadsheet, AlertCircle, X, Clock, Award, Shield, Activity, AlertTriangle, TrendingUp, MessageSquare, Send, ChevronDown, Maximize2, Minimize2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar } from 'recharts';
 import * as XLSX from 'xlsx';

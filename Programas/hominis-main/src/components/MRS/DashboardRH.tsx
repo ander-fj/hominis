@@ -3,7 +3,7 @@ import { Users, UserX, Clock, Calendar, Briefcase, TrendingUp, Download, LayoutD
 import { motion } from 'framer-motion';
 import { collection, getDocs, query, where, orderBy } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine, Area, AreaChart, Label, LabelList } from 'recharts';
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList } from 'recharts';
 import MRSCard from './MRSCard';
 import MRSStatCard from './MRSStatCard';
 import PeriodFilter from './PeriodFilter';
