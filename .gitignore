@@ -1,0 +1,19 @@
+# dependências
+node_modules/
+
+# build
+dist/
+
+# env
+.env
+.env.local
+.env.production
+.env.*
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# sistema
+.DS_Store
