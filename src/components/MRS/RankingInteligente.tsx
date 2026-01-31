@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Trophy, Download, Filter, TrendingUp, TrendingDown, FileText, Info, CheckCircle2, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react';
 // Removed framer-motion to fix DOM errors
-import { collection, getDocs, query, where, orderBy, onSnapshot } from 'firebase/firestore';
+import { collection, getDocs, query, where, orderBy, onSnapshot, limit } from 'firebase/firestore';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar, Legend, LabelList } from 'recharts';
 import MRSCard from './MRSCard';
 import { calculateIntelligentRanking, RankingResult, generatePerformanceData } from '../../lib/rankingEngine';
@@ -10,6 +10,7 @@ import { getMedalEmoji, getMedalColor } from '../../lib/theme'; // Presuming the
 import { exportRankingToPDF, exportRankingToXLSX } from '../../lib/exportUtils'; // Presuming export is independent
 import html2canvas from 'html2canvas';
 import { db } from '../../lib/firebase';
+import { getTenantCollection } from '../../lib/tenantUtils';
 import jsPDF from 'jspdf';
 
 interface EvaluationCriteria {
@@ -48,28 +49,47 @@ export default function RankingInteligente() {
       setLoading(true);
       try {
         // 1. Carregar Critérios de Avaliação
-        const criteriaQuery = query(collection(db, 'evaluation_criteria'), where('active', '==', true));
+        const criteriaQuery = query(getTenantCollection('evaluation_criteria'), where('active', '==', true));
         const criteriaSnapshot = await getDocs(criteriaQuery);
         const criteriaData = (criteriaSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as EvaluationCriteria[])
           .sort((a, b) => a.display_order - b.display_order);
         setCriteria(criteriaData);
 
         // Fetch available periods from rankings
-        const periodsQuery = query(collection(db, 'employee_rankings'), orderBy('period', 'desc'));
+        const periodsQuery = query(getTenantCollection('employee_rankings'), orderBy('period', 'desc'));
         const periodsSnapshot = await getDocs(periodsQuery);
-        const periods = [...new Set(periodsSnapshot.docs.map(doc => doc.data().period as string))]
-          .filter(p => p !== 'consolidated'); // Remove 'consolidated' from the list
+        const uniquePeriods = new Set<string>();
         
-        const periodOptions = periods.map(p => ({
-          value: p,
-          // Simple date formatting, can be improved with date-fns if needed
-          label: new Date(p + 'T00:00:00').toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
-        }));
+        periodsSnapshot.docs.forEach(doc => {
+          const p = doc.data().period;
+          if (p && p !== 'consolidated') uniquePeriods.add(p);
+        });
+        
+        // Também buscar dos scores para garantir que períodos com dados mas sem ranking apareçam
+        const scoresQuery = query(getTenantCollection('employee_scores'), orderBy('period', 'desc'), limit(2000));
+        const scoresSnapshot = await getDocs(scoresQuery);
+        scoresSnapshot.forEach(doc => {
+          const p = doc.data().period;
+          if (p && /^\d{4}-\d{2}/.test(p)) uniquePeriods.add(p);
+        });
+
+        const periods = [...uniquePeriods].sort().reverse();
+
+        const periodOptionsMap = new Map();
+        
+        periods.forEach(p => {
+          const label = new Date(p + 'T00:00:00').toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+          if (!periodOptionsMap.has(label) || p.length > periodOptionsMap.get(label).value.length) {
+            periodOptionsMap.set(label, { value: p, label });
+          }
+        });
+
+        const periodOptions = Array.from(periodOptionsMap.values());
         setAvailablePeriods(periodOptions);
 
         // 2. Carregar Rankings
         const periodToLoad = !selectedPeriod || selectedPeriod === '' ? 'consolidated' : selectedPeriod;
-        const rankingsQuery = query(collection(db, 'employee_rankings'), where('period', '==', periodToLoad));
+        const rankingsQuery = query(getTenantCollection('employee_rankings'), where('period', '==', periodToLoad));
         
         unsubscribeRankings = onSnapshot(rankingsQuery, async (snapshot) => {
           let results: RankingResult[] = snapshot.docs.map(doc => doc.data() as RankingResult);
@@ -177,7 +197,7 @@ export default function RankingInteligente() {
   const loadEmployeeHistory = async (employeeId: string) => {
     try {
       const historyQuery = query(
-        collection(db, 'employee_rankings'),
+        getTenantCollection('employee_rankings'),
         where('employee_id', '==', employeeId),
       );
       const historySnapshot = await getDocs(historyQuery);
@@ -191,7 +211,7 @@ export default function RankingInteligente() {
   };
 
   const loadCriteria = async () => {
-    const criteriaQuery = query(collection(db, 'evaluation_criteria'), where('active', '==', true));
+    const criteriaQuery = query(getTenantCollection('evaluation_criteria'), where('active', '==', true));
     const criteriaSnapshot = await getDocs(criteriaQuery);
     const criteriaData = (criteriaSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as EvaluationCriteria[])
       .sort((a, b) => a.display_order - b.display_order);
@@ -206,7 +226,7 @@ export default function RankingInteligente() {
       // Garante que os critérios estejam carregados
       let criteriaData = criteria;
       if (criteriaData.length === 0) {
-        const criteriaQuery = query(collection(db, 'evaluation_criteria'), where('active', '==', true));
+        const criteriaQuery = query(getTenantCollection('evaluation_criteria'), where('active', '==', true));
         const criteriaSnapshot = await getDocs(criteriaQuery);
         criteriaData = (criteriaSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as EvaluationCriteria[])
           .sort((a, b) => a.display_order - b.display_order);
@@ -216,7 +236,7 @@ export default function RankingInteligente() {
       // Busca os detalhes do ranking do colaborador no período correto
       const periodToLoad = !selectedPeriod || selectedPeriod === '' ? 'consolidated' : selectedPeriod;
       const rankingDetailsQuery = query(
-        collection(db, 'employee_rankings'),
+        getTenantCollection('employee_rankings'),
         where('employee_id', '==', ranking.employee_id)
       );
       const rankingDetailsSnapshot = await getDocs(rankingDetailsQuery);
@@ -253,8 +273,31 @@ export default function RankingInteligente() {
 
   const handleRefresh = async () => {
     if (!selectedPeriod || selectedPeriod === '') {
-      alert('⚠️ Por favor, selecione um período primeiro!\n\nVocê precisa escolher um mês/ano específico antes de recalcular o ranking.');
-      return;
+      // Se estiver no consolidado, perguntar se quer recalcular tudo encontrado
+      if (confirm('Deseja buscar e recalcular rankings para TODOS os períodos encontrados nos dados?')) {
+        setRefreshing(true);
+        try {
+           const scoresQuery = query(getTenantCollection('employee_scores'));
+           const scoresSnapshot = await getDocs(scoresQuery);
+           const periods = new Set<string>();
+           scoresSnapshot.forEach(doc => {
+             const p = doc.data().period;
+             if (p && /^\d{4}-\d{2}$/.test(p)) periods.add(p);
+           });
+           
+           for (const period of periods) {
+             await calculateIntelligentRanking(period, true);
+           }
+           window.location.reload();
+        } catch (e) {
+           alert('Erro ao recalcular: ' + e);
+        } finally {
+           setRefreshing(false);
+        }
+        return;
+      } else {
+        return;
+      }
     }
 
     setRefreshing(true);
@@ -326,7 +369,7 @@ export default function RankingInteligente() {
     const uniqueRankings = new Map();
 
     employeeHistory.forEach((h) => {
-      if (h.period === 'consolidated' || !/^\d{4}-\d{2}$/.test(h.period)) return;
+      if (h.period === 'consolidated' || !/^\d{4}-\d{2}/.test(h.period)) return;
 
       const [year, month] = h.period.split('-');
       const monthNames = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];

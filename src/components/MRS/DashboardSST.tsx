@@ -4,6 +4,7 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, L
 import MRSCard from './MRSCard';
 import { collection, getDocs, query, where, orderBy, limit } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
+import { getTenantCollection } from '../../lib/tenantUtils';
 import MRSStatCard from './MRSStatCard';
 import GoalsEditor from './GoalsEditor';
 import PeriodFilter from './PeriodFilter';
@@ -92,13 +93,33 @@ export default function DashboardSST() {
 
   useEffect(() => {
     const fetchPeriods = async () => {
-      const periodsQuery = query(collection(db, 'employee_rankings'), orderBy('period', 'desc'));
+      const periodsQuery = query(getTenantCollection('employee_rankings'), orderBy('period', 'desc'));
       const periodsSnapshot = await getDocs(periodsQuery);
-      const periods = [...new Set(periodsSnapshot.docs.map(doc => doc.data().period as string))].filter(p => p !== 'consolidated');
-      const periodOptions = periods.map(p => ({
-        value: p,
-        label: new Date(p + 'T00:00:00').toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
-      }));
+      const uniquePeriods = new Set<string>();
+      
+      periodsSnapshot.docs.forEach(doc => {
+        const p = doc.data().period;
+        if (p && p !== 'consolidated') uniquePeriods.add(p);
+      });
+
+      const scoresQuery = query(getTenantCollection('employee_scores'), orderBy('period', 'desc'), limit(2000));
+      const scoresSnapshot = await getDocs(scoresQuery);
+      scoresSnapshot.forEach(doc => {
+        const p = doc.data().period;
+        if (p && /^\d{4}-\d{2}/.test(p)) uniquePeriods.add(p);
+      });
+
+      const periods = [...uniquePeriods].sort().reverse();
+      const periodOptionsMap = new Map();
+      
+      periods.forEach(p => {
+        const label = new Date(p + 'T00:00:00').toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+        if (!periodOptionsMap.has(label) || p.length > periodOptionsMap.get(label).value.length) {
+          periodOptionsMap.set(label, { value: p, label });
+        }
+      });
+
+      const periodOptions = Array.from(periodOptionsMap.values());
       setAvailablePeriods(periodOptions);
     };
     fetchPeriods();
@@ -106,7 +127,7 @@ export default function DashboardSST() {
 
   const loadGoals = async () => {
     try {
-      const goalsSnapshot = await getDocs(collection(db, 'sst_goals'));
+      const goalsSnapshot = await getDocs(getTenantCollection('sst_goals'));
 
       if (!goalsSnapshot.empty) {
         const goalsData = goalsSnapshot.docs.map(doc => doc.data());
@@ -136,7 +157,7 @@ export default function DashboardSST() {
     try {
       const { startDate, endDate } = calculateDateRange(selectedPeriod);
 
-      let employeesQuery = query(collection(db, 'employees'));
+      let employeesQuery = query(getTenantCollection('employees'));
       if (showOnlyActive) {
         employeesQuery = query(employeesQuery, where('active', '==', true));
       }
@@ -146,7 +167,7 @@ export default function DashboardSST() {
       const activeEmployeeIds = activeEmployees.map(e => e.id);
 
       const createFilteredQuery = (collectionName: string) => {
-        let q = query(collection(db, collectionName));
+        let q = query(getTenantCollection(collectionName));
         const dateFieldMap: { [key: string]: string } = {
           'sst_trainings': 'completion_date',
           'sst_ppe': 'delivery_date',
@@ -354,7 +375,7 @@ export default function DashboardSST() {
     try {
       const { startDate, endDate } = calculateDateRange(selectedPeriod);
       
-      let employeesQuery = query(collection(db, 'employees'));
+      let employeesQuery = query(getTenantCollection('employees'));
       if (showOnlyActive) {
         employeesQuery = query(employeesQuery, where('active', '==', true));
       }
@@ -364,7 +385,7 @@ export default function DashboardSST() {
       const activeEmployeeIds = employeesData.map(e => e.id);
 
       const createFilteredQuery = (collectionName: string) => {
-        let q = query(collection(db, collectionName));
+        let q = query(getTenantCollection(collectionName));
         const dateFieldMap: { [key: string]: string } = {
           'sst_trainings': 'completion_date',
           'sst_ppe': 'delivery_date',
@@ -495,13 +516,13 @@ export default function DashboardSST() {
     try {
       let data: any[] = [];
       
-      let employeesQuery = query(collection(db, 'employees'), where('active', '==', true));
+      let employeesQuery = query(getTenantCollection('employees'), where('active', '==', true));
       const employeesSnapshot = await getDocs(employeesQuery);
       const employeeMap = new Map(employeesSnapshot.docs.map(doc => [doc.id, doc.data()]));
       const activeEmployeeIds = new Set(employeeMap.keys());
 
       const getQueryForCard = (collectionName: string, statusField: string, statuses: string[]) => {
-        let q = query(collection(db, collectionName), where(statusField, 'in', statuses));
+        let q = query(getTenantCollection(collectionName), where(statusField, 'in', statuses));
         return q;
       };
 

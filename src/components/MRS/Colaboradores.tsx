@@ -6,6 +6,7 @@ import * as XLSX from 'xlsx';
 import MRSCard from './MRSCard';
 import MRSStatCard from './MRSStatCard';
 import { db } from '../../lib/firebase';
+import { getTenantCollection } from '../../lib/tenantUtils';
 import { collection, getDocs, query, orderBy, deleteDoc, doc, addDoc, updateDoc, where } from 'firebase/firestore';
 import { formatDate, formatNumber, getCurrentMonth } from '../../lib/format';
 import { exportToXLSX, ExportData } from '../../lib/exportUtils';
@@ -46,7 +47,8 @@ export default function Colaboradores() {
   const loadEmployees = async () => {
     setLoading(true);
     try {
-      const employeesQuery = query(collection(db, 'employees'), orderBy('name'));
+      // USA A COLEÇÃO DO TENANT AO INVÉS DA RAIZ
+      const employeesQuery = query(getTenantCollection('employees'), orderBy('name'));
       const querySnapshot = await getDocs(employeesQuery);
 
       if (!querySnapshot.empty) {
@@ -84,7 +86,8 @@ export default function Colaboradores() {
     if (!confirm('Tem certeza que deseja excluir este colaborador?')) return;
 
     try {
-      await deleteDoc(doc(db, 'employees', id));
+      // Deleta usando a referência correta do tenant
+      await deleteDoc(doc(getTenantCollection('employees'), id));
       await loadEmployees();
       alert('Colaborador excluído com sucesso!');
     } catch (error) {
@@ -152,11 +155,16 @@ export default function Colaboradores() {
     let errorCount = 0;
     const errors: string[] = [];
 
+    // Buscar colaboradores existentes para evitar duplicatas
+    const existingSnapshot = await getDocs(getTenantCollection('employees'));
+    const existingMap = new Map(existingSnapshot.docs.map(d => [d.data().email?.toLowerCase(), d.id]));
+
     for (const row of data) {
       try {
+        const email = (row.email || row.Email || row.EMAIL || '').toLowerCase();
         const employeeData = {
           name: row.nome || row.Name || row.NOME,
-          email: row.email || row.Email || row.EMAIL,
+          email: email,
           department: row.departamento || row.Department || row.DEPARTAMENTO || 'Operacional',
           position: row.cargo || row.Position || row.CARGO || 'Colaborador',
           hire_date: parseDate(row.data_admissao || row.hire_date || row.DATA_ADMISSAO) || new Date().toISOString().split('T')[0],
@@ -171,7 +179,12 @@ export default function Colaboradores() {
         }
 
         try {
-          await addDoc(collection(db, 'employees'), employeeData);
+          const existingId = existingMap.get(email);
+          if (existingId) {
+            await updateDoc(doc(getTenantCollection('employees'), existingId), employeeData);
+          } else {
+            await addDoc(getTenantCollection('employees'), employeeData);
+          }
           successCount++;
         } catch (dbError) {
           errorCount++;
@@ -586,11 +599,11 @@ function EmployeeModal({ employee, onClose, onSave }: EmployeeModalProps) {
 
     try {
       if (employee) {
-        const employeeRef = doc(db, 'employees', employee.id);
+        const employeeRef = doc(getTenantCollection('employees'), employee.id);
         await updateDoc(employeeRef, formData);
         alert('Colaborador atualizado com sucesso!');
       } else {
-        await addDoc(collection(db, 'employees'), formData);
+        await addDoc(getTenantCollection('employees'), formData);
         alert('Colaborador adicionado com sucesso!');
       }
 
@@ -818,11 +831,11 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
     try {
       // Buscar dados básicos
       const [trainingsSnapshot, examsSnapshot, absencesSnapshot, commentsSnapshot, rankingsSnapshot] = await Promise.all([
-        getDocs(query(collection(db, 'sst_trainings'), where('employee_id', '==', employee.id))),
-        getDocs(query(collection(db, 'sst_medical_exams'), where('employee_id', '==', employee.id))),
-        getDocs(query(collection(db, 'attendance_records'), where('employee_id', '==', employee.id), where('status', '==', 'absent'))),
-        getDocs(query(collection(db, 'employee_comments'), where('employee_id', '==', employee.id))),
-        getDocs(query(collection(db, 'employee_rankings'), where('employee_id', '==', employee.id)))
+        getDocs(query(getTenantCollection('sst_trainings'), where('employee_id', '==', employee.id))),
+        getDocs(query(getTenantCollection('sst_medical_exams'), where('employee_id', '==', employee.id))),
+        getDocs(query(getTenantCollection('attendance_records'), where('employee_id', '==', employee.id), where('status', '==', 'absent'))),
+        getDocs(query(getTenantCollection('employee_comments'), where('employee_id', '==', employee.id))),
+        getDocs(query(getTenantCollection('employee_rankings'), where('employee_id', '==', employee.id)))
       ]);
 
       setTrainings(trainingsSnapshot.docs.map(doc => doc.data()));
@@ -841,7 +854,7 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
       }
 
       // Buscar dados do ranking consolidado (todos os períodos) - SOMA TOTAL = 283.1
-      const allRankingsSnapshot = await getDocs(query(collection(db, 'employee_rankings'), where('employee_id', '==', employee.id)));
+      const allRankingsSnapshot = await getDocs(query(getTenantCollection('employee_rankings'), where('employee_id', '==', employee.id)));
       const allRankingsData = allRankingsSnapshot.docs.map(doc => doc.data());
 
       if (allRankingsData.length > 0) {
@@ -852,8 +865,8 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
         }, 0);
 
         // Buscar scores para calcular detalhes por critério
-        const allScoresSnapshot = await getDocs(query(collection(db, 'employee_scores'), where('employee_id', '==', employee.id)));
-        const criteriaSnapshot = await getDocs(query(collection(db, 'evaluation_criteria'), where('active', '==', true)));
+        const allScoresSnapshot = await getDocs(query(getTenantCollection('employee_scores'), where('employee_id', '==', employee.id)));
+        const criteriaSnapshot = await getDocs(query(getTenantCollection('evaluation_criteria'), where('active', '==', true)));
 
         if (!allScoresSnapshot.empty && !criteriaSnapshot.empty) {
           const allScores = allScoresSnapshot.docs.map(doc => doc.data());
@@ -1033,7 +1046,7 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
 
     setSavingComment(true);
     try {
-      await addDoc(collection(db, 'employee_comments'), {
+      await addDoc(getTenantCollection('employee_comments'), {
         employee_id: employee.id,
         comment: newComment,
         created_by: commentAuthor.trim() || 'Anônimo',
@@ -1056,7 +1069,7 @@ function EmployeeDetailsModal({ employee, onClose }: EmployeeDetailsModalProps) 
     if (!confirm('Tem certeza que deseja excluir este comentário?')) return;
 
     try {
-      await deleteDoc(doc(db, 'employee_comments', commentId));
+      await deleteDoc(doc(getTenantCollection('employee_comments'), commentId));
       await loadEmployeeDetails();
     } catch (error) {
       console.error('Erro ao excluir comentário:', error);

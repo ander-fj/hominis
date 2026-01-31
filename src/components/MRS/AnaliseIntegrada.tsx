@@ -33,10 +33,16 @@ export default function AnaliseIntegrada() {
       const periodsQuery = query(collection(db, 'employee_rankings'), orderBy('period', 'desc'));
       const periodsSnapshot = await getDocs(periodsQuery);
       const periods = [...new Set(periodsSnapshot.docs.map(doc => doc.data().period as string))].filter(p => p !== 'consolidated');
-      const periodOptions = periods.map(p => ({
-        value: p,
-        label: new Date(p + 'T00:00:00').toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
-      }));
+      const periodOptionsMap = new Map();
+      
+      periods.forEach(p => {
+        const label = new Date(p + 'T00:00:00').toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+        if (!periodOptionsMap.has(label) || p.length > periodOptionsMap.get(label).value.length) {
+          periodOptionsMap.set(label, { value: p, label });
+        }
+      });
+
+      const periodOptions = Array.from(periodOptionsMap.values());
       setAvailablePeriods(periodOptions);
     };
     fetchPeriods();

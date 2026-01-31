@@ -4,8 +4,8 @@ import * as XLSX from 'xlsx';
 import MRSCard from './MRSCard';
 import { db } from '../../lib/firebase';
 import { collection, getDocs, query, where, addDoc, updateDoc, doc, writeBatch, limit } from 'firebase/firestore';
+import { getTenantCollection } from '../../lib/tenantUtils';
 import { calculateIntelligentRanking } from '../../lib/rankingEngine';
-import { seedCriteriaIfEmpty } from '../../lib/seed';
 
 type ImportType = 'colaboradores' | 'avaliacoes' | 'treinamentos' | 'epis' | 'exames' | 'incidentes' | 'ferias';
 
@@ -137,7 +137,7 @@ export default function ImportacaoIndividual() {
       await new Promise(resolve => setTimeout(resolve, 500));
 
       if (type !== 'colaboradores') {
-        const employeesQuery = query(collection(db, 'employees'), limit(1));
+        const employeesQuery = query(getTenantCollection('employees'), limit(1));
         const employeesSnapshot = await getDocs(employeesQuery);
 
         if (employeesSnapshot.empty) {
@@ -147,7 +147,7 @@ export default function ImportacaoIndividual() {
       }
 
       // Pre-fetch employees for mapping emails to IDs, improving performance
-      const employeesSnapshot = await getDocs(collection(db, 'employees'));
+      const employeesSnapshot = await getDocs(getTenantCollection('employees'));
       const employeeEmailMap = new Map(employeesSnapshot.docs.map(doc => [
         doc.data().email.toLowerCase(),
         { id: doc.id, department: doc.data().department }
@@ -178,9 +178,10 @@ export default function ImportacaoIndividual() {
           const batch = writeBatch(db);
           for (const row of rows) {
             try {
+              const email = (row.email || '').toLowerCase();
               const employeeData = {
                 name: row.nome || row.name,
-                email: (row.email || '').toLowerCase(),
+                email: email,
                 department: row.departamento || row.department,
                 position: row.cargo || row.position,
                 hire_date: parseExcelDate(row.data_admissao || row.hire_date),
@@ -190,8 +191,15 @@ export default function ImportacaoIndividual() {
 
               if (!employeeData.name || !employeeData.email) continue;
 
-              const newDocRef = doc(collection(db, 'employees'));
-              batch.set(newDocRef, employeeData);
+              const existingEmployee = employeeEmailMap.get(email);
+
+              if (existingEmployee) {
+                const docRef = doc(getTenantCollection('employees'), existingEmployee.id);
+                batch.update(docRef, employeeData);
+              } else {
+                const newDocRef = doc(getTenantCollection('employees'));
+                batch.set(newDocRef, employeeData);
+              }
               successCount++;
             } catch {
               errorCount++;
@@ -204,11 +212,25 @@ export default function ImportacaoIndividual() {
         case 'avaliacoes': {
           console.log(`Iniciando importação de ${rows.length} avaliações...`);
 
-          let criteriaSnapshot = await getDocs(collection(db, 'evaluation_criteria'));
+          let criteriaSnapshot = await getDocs(getTenantCollection('evaluation_criteria'));
           if (criteriaSnapshot.empty) {
             console.warn('Critérios não encontrados, tentando semear automaticamente...');
-            await seedCriteriaIfEmpty();
-            criteriaSnapshot = await getDocs(collection(db, 'evaluation_criteria')); // Tenta buscar novamente
+            
+            const defaultCriteria = [
+              { name: 'Assiduidade', description: 'Assiduidade e presença', weight: 25, direction: 'higher_better', display_order: 1, active: true, data_type: 'percentage', source: 'calculated' },
+              { name: 'Pontualidade', description: 'Pontualidade nos horários', weight: 15, direction: 'higher_better', display_order: 2, active: true, data_type: 'numeric', source: 'calculated' },
+              { name: 'Horas Trabalhadas', description: 'Total de horas trabalhadas', weight: 20, direction: 'higher_better', display_order: 3, active: true, data_type: 'numeric', source: 'manual' },
+              { name: 'Produtividade', description: 'Entrega de resultados', weight: 40, direction: 'higher_better', display_order: 4, active: true, data_type: 'percentage', source: 'manual' }
+            ];
+
+            const batch = writeBatch(db);
+            for (const criterion of defaultCriteria) {
+              const newDocRef = doc(getTenantCollection('evaluation_criteria'));
+              batch.set(newDocRef, criterion);
+            }
+            await batch.commit();
+            
+            criteriaSnapshot = await getDocs(getTenantCollection('evaluation_criteria')); // Tenta buscar novamente
           }
 
           if (criteriaSnapshot.empty) {
@@ -292,7 +314,7 @@ export default function ImportacaoIndividual() {
 
               for (const score of scores) {
                 const docId = `${score.employee_id}_${score.period}_${score.criterion_id}`;
-                const docRef = doc(db, 'employee_scores', docId);
+                const docRef = doc(getTenantCollection('employee_scores'), docId);
                 batch.set(docRef, score, { merge: true });
                 successCount++;
               }
@@ -313,7 +335,7 @@ export default function ImportacaoIndividual() {
               errorCount++;
               continue;
             }
-            const newDocRef = doc(collection(db, 'sst_trainings'));
+            const newDocRef = doc(getTenantCollection('sst_trainings'));
             batch.set(newDocRef, {
               employee_id: employee.id,
               training_name: row.training_name,
@@ -336,7 +358,7 @@ export default function ImportacaoIndividual() {
               errorCount++;
               continue;
             }
-            const newDocRef = doc(collection(db, 'sst_ppe'));
+            const newDocRef = doc(getTenantCollection('sst_ppe'));
             batch.set(newDocRef, {
               employee_id: employee.id,
               ppe_type: row.equipment_type,
@@ -360,7 +382,7 @@ export default function ImportacaoIndividual() {
               errorCount++;
               continue;
             }
-            const newDocRef = doc(collection(db, 'sst_medical_exams'));
+            const newDocRef = doc(getTenantCollection('sst_medical_exams'));
             batch.set(newDocRef, {
               employee_id: employee.id,
               exam_type: row.exam_type || 'Admissional',
@@ -416,7 +438,7 @@ export default function ImportacaoIndividual() {
             };
             console.log('[incidentes] Dados a serem inseridos:', incidentData);
 
-            const newDocRef = doc(collection(db, 'sst_incidents'));
+            const newDocRef = doc(getTenantCollection('sst_incidents'));
             batch.set(newDocRef, incidentData);
             successCount++;
           }
@@ -432,7 +454,7 @@ export default function ImportacaoIndividual() {
               errorCount++;
               continue;
             }
-            const newDocRef = doc(collection(db, 'vacation_records'));
+            const newDocRef = doc(getTenantCollection('vacation_records'));
             batch.set(newDocRef, {
               employee_id: employee.id,
               period_start: parseExcelDate(row.period_start),
@@ -474,7 +496,7 @@ export default function ImportacaoIndividual() {
             }
 
             for (const period of uniquePeriods) {
-              await calculateIntelligentRanking(period, false);
+              await calculateIntelligentRanking(period, true);
             }
             console.log('Rankings recalculados automaticamente');
           } catch (err) {

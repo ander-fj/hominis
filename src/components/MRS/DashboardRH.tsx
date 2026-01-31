@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import { Users, UserX, Clock, Calendar, Briefcase, TrendingUp, Download, LayoutDashboard, Camera, X } from 'lucide-react';
 import { motion } from 'framer-motion';
-import { collection, getDocs, query, where, orderBy } from 'firebase/firestore';
+import { collection, getDocs, query, where, orderBy, limit } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
+import { getTenantCollection } from '../../lib/tenantUtils';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList } from 'recharts';
 import MRSCard from './MRSCard';
 import MRSStatCard from './MRSStatCard';
@@ -72,17 +73,38 @@ export default function DashboardRH() {
     setLoading(true);
     try {
       // Carregar períodos disponíveis
-      const periodsQuery = query(collection(db, 'employee_rankings'), orderBy('period', 'desc'));
+      const periodsQuery = query(getTenantCollection('employee_rankings'), orderBy('period', 'desc'));
       const periodsSnapshot = await getDocs(periodsQuery);
-      const periods = [...new Set(periodsSnapshot.docs.map(doc => doc.data().period as string))].filter(p => p !== 'consolidated');
-      const periodOptions = periods.map(p => ({
-        value: p,
-        label: new Date(p + 'T00:00:00').toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
-      }));
+      const uniquePeriods = new Set<string>();
+      
+      periodsSnapshot.docs.forEach(doc => {
+        const p = doc.data().period;
+        if (p && p !== 'consolidated') uniquePeriods.add(p);
+      });
+
+      const scoresQueryPeriods = query(getTenantCollection('employee_scores'), orderBy('period', 'desc'), limit(2000));
+      const scoresSnapshotPeriods = await getDocs(scoresQueryPeriods);
+      scoresSnapshotPeriods.forEach(doc => {
+        const p = doc.data().period;
+        if (p && /^\d{4}-\d{2}/.test(p)) uniquePeriods.add(p);
+      });
+
+      const periods = [...uniquePeriods].sort().reverse();
+      const periodOptionsMap = new Map();
+      
+      periods.forEach(p => {
+        const label = new Date(p + 'T00:00:00').toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+        // Se já existe um label igual, mantém o que tiver a data mais completa (maior string)
+        if (!periodOptionsMap.has(label) || p.length > periodOptionsMap.get(label).value.length) {
+          periodOptionsMap.set(label, { value: p, label });
+        }
+      });
+
+      const periodOptions = Array.from(periodOptionsMap.values());
       setAvailablePeriods(periodOptions);
 
       // Carregar lista de colaboradores para o filtro
-      const allEmployeesQuery = query(collection(db, 'employees'), where('active', '==', true));
+      const allEmployeesQuery = query(getTenantCollection('employees'), where('active', '==', true));
       const allEmployeesSnapshot = await getDocs(allEmployeesQuery);
       const allEmployeesData = allEmployeesSnapshot.docs
         .map(doc => ({ id: doc.id, name: doc.data().name as string }))
@@ -90,7 +112,7 @@ export default function DashboardRH() {
       setEmployeesList(allEmployeesData);
 
       // Filtrar colaboradores selecionados
-      let employeesQuery = query(collection(db, 'employees'), where('active', '==', true));
+      let employeesQuery = query(getTenantCollection('employees'), where('active', '==', true));
       if (selectedEmployee !== 'all') {
         employeesQuery = query(employeesQuery, where('__name__', '==', selectedEmployee));
       }
@@ -99,7 +121,7 @@ export default function DashboardRH() {
 
       // Carregar pontuações (scores)
       const { startDate, endDate } = calculateDateRange(selectedPeriod);
-      let scoresQuery = collection(db, 'employee_scores');
+      let scoresQuery = getTenantCollection('employee_scores');
       
       let finalScoresQuery;
       if (selectedPeriod !== 'all') {
@@ -113,7 +135,7 @@ export default function DashboardRH() {
       const scoresSnapshot = await getDocs(finalScoresQuery);
       // Simula a junção que o Supabase fazia, adicionando o nome do critério ao score.
       // Isso pode ser otimizado no futuro.
-      const criteriaSnapshot = await getDocs(collection(db, 'evaluation_criteria'));
+      const criteriaSnapshot = await getDocs(getTenantCollection('evaluation_criteria'));
       const criteriaMap = new Map(criteriaSnapshot.docs.map(doc => [doc.id, doc.data()]));
 
       let scores = scoresSnapshot.docs.map(doc => {

@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { LogIn, AlertCircle, User, Lock } from 'lucide-react';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import { auth } from '../../lib/firebase';
+import { initializeUserSession } from '../../lib/tenantUtils';
 
 interface LoginProps {
   onLoginSuccess: () => void;
@@ -21,7 +22,10 @@ export default function Login({ onLoginSuccess }: LoginProps) {
     setLoading(true);
 
     try {
-      await signInWithEmailAndPassword(auth, username, password);
+      const userCredential = await signInWithEmailAndPassword(auth, username, password);
+      
+      // Inicializa sessão do tenant (cria se não existir, busca se existir)
+      await initializeUserSession(userCredential.user);
       
       localStorage.setItem('isAuthenticated', 'true');
       localStorage.setItem('username', username);

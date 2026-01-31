@@ -7,35 +7,25 @@ import MRSCard from './MRSCard';
 import RecalculationStatus from './RecalculationStatus';
 import { db } from '../../lib/firebase';
 import { collection, getDocs, doc, updateDoc, addDoc, deleteDoc, writeBatch, query, orderBy, getDoc, limit } from 'firebase/firestore';
+import { getTenantCollection } from '../../lib/tenantUtils';
 import { recalculateAllRankingsEngine, generateHistoricalData } from '../../lib/rankingEngine';
 import { seedSampleData } from '../../lib/seed';
 import * as XLSX from 'xlsx';
 
-// Helper function to delete a collection in batches, including subcollections
+// Helper function to delete a collection in batches
 async function deleteCollection(collectionRef: any, batchSize: number = 500) {
   const q = query(collectionRef, limit(batchSize));
 
-  return new Promise((resolve, reject) => {
-    deleteQueryBatch(q, resolve).catch(reject);
-  });
-}
+  while (true) {
+    const snapshot = await getDocs(q);
+    if (snapshot.size === 0) break;
 
-async function deleteQueryBatch(q: any, resolve: any) {
-  const snapshot = await getDocs(q);
-
-  if (snapshot.size === 0) {
-    resolve();
-    return;
+    const batch = writeBatch(db);
+    snapshot.docs.forEach((doc) => {
+      batch.delete(doc.ref);
+    });
+    await batch.commit();
   }
-
-  const batch = writeBatch(db);
-  snapshot.docs.forEach((doc) => {
-    batch.delete(doc.ref);
-  });
-  await batch.commit();
-
-  // Recursively call itself until all docs are deleted
-  setTimeout(() => deleteQueryBatch(q, resolve), 0); // Use setTimeout for browser environment
 }
 
 interface Criterion {
@@ -192,7 +182,7 @@ export default function Configuracoes() {
   }, []);
 
   const loadCriteria = async () => {
-    const criteriaQuery = query(collection(db, 'evaluation_criteria'), orderBy('display_order'));
+    const criteriaQuery = query(getTenantCollection('evaluation_criteria'), orderBy('display_order'));
     const querySnapshot = await getDocs(criteriaQuery);
     const data = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Criterion[];
     if (data) setCriteria(data);
@@ -200,27 +190,27 @@ export default function Configuracoes() {
 
   const loadSheetConfig = async () => {
     // Assuming a single document for config, e.g., with ID 'main'
-    const configDoc = await getDoc(doc(db, 'sheets_sync_config', 'main'));
+    const configDoc = await getDoc(doc(getTenantCollection('sheets_sync_config'), 'main'));
     if (configDoc.exists()) {
       setSheetUrl(configDoc.data().sheet_url);
     }
   };
 
   const loadSyncPages = async () => {
-    const pagesQuery = query(collection(db, 'sheets_sync_pages'), orderBy('page_name'));
+    const pagesQuery = query(getTenantCollection('sheets_sync_pages'), orderBy('page_name'));
     const querySnapshot = await getDocs(pagesQuery);
     const data = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as SyncPage[];
     if (data) setSyncPages(data);
   };
 
   const togglePageEnabled = async (pageId: string, currentValue: boolean) => {
-    const pageRef = doc(db, 'sheets_sync_pages', pageId);
+    const pageRef = doc(getTenantCollection('sheets_sync_pages'), pageId);
     await updateDoc(pageRef, { is_enabled: !currentValue });
     await loadSyncPages();
   };
 
   const toggleAccumulateData = async (pageId: string, currentValue: boolean) => {
-    const pageRef = doc(db, 'sheets_sync_pages', pageId);
+    const pageRef = doc(getTenantCollection('sheets_sync_pages'), pageId);
     await updateDoc(pageRef, { accumulate_data: !currentValue });
     await loadSyncPages();
   };
@@ -246,7 +236,7 @@ export default function Configuracoes() {
       alert('Funcionalidade de sincronização em desenvolvimento. Em breve será possível importar dados diretamente do Google Sheets!');
       const batch = writeBatch(db);
       for (const page of enabledPages) {
-        const pageRef = doc(db, 'sheets_sync_pages', page.id);
+        const pageRef = doc(getTenantCollection('sheets_sync_pages'), page.id);
         batch.update(pageRef, { last_sync_at: new Date().toISOString(), sync_count: page.sync_count + 1 });
       }
       await batch.commit();
@@ -295,12 +285,12 @@ export default function Configuracoes() {
       active: true,
     };
 
-    const docRef = await addDoc(collection(db, 'evaluation_criteria'), newCriterion);
+    const docRef = await addDoc(getTenantCollection('evaluation_criteria'), newCriterion);
     setCriteria([...criteria, { id: docRef.id, ...newCriterion }]);
   };
 
   const handleDelete = async (id: string) => {
-    await deleteDoc(doc(db, 'evaluation_criteria', id));
+    await deleteDoc(doc(getTenantCollection('evaluation_criteria'), id));
     setCriteria(prev => prev.filter(c => c.id !== id));
   };
 
@@ -310,7 +300,7 @@ export default function Configuracoes() {
       const batch = writeBatch(db);
       criteria.forEach(criterion => {
         const { id, ...dataToUpdate } = criterion;
-        const docRef = doc(db, 'evaluation_criteria', id);
+        const docRef = doc(getTenantCollection('evaluation_criteria'), id);
         batch.update(docRef, {
           name: dataToUpdate.name,
           description: dataToUpdate.description,
@@ -417,18 +407,16 @@ export default function Configuracoes() {
 
       for (const collectionName of collectionsToDelete) {
         try {
-          const collectionRef = collection(db, collectionName);
-          const snapshot = await getDocs(query(collectionRef));
-          if (snapshot.empty) {
+          const collectionRef = getTenantCollection(collectionName);
+          const snapshotCheck = await getDocs(query(collectionRef, limit(1)));
+          if (snapshotCheck.empty) {
             logLines.push(`- ${collectionName}: Vazia, nada para excluir.`);
             continue;
           }
 
-          const batch = writeBatch(db);
-          snapshot.forEach(doc => batch.delete(doc.ref));
-          await batch.commit();
-          logLines.push(`✓ ${collectionName}: ${snapshot.size} registros excluídos.`);
-          totalDeleted += snapshot.size;
+          await deleteCollection(collectionRef);
+          logLines.push(`✓ ${collectionName}: Dados excluídos.`);
+          totalDeleted++;
         } catch (error) {
           console.error(`Erro ao excluir a coleção ${collectionName}:`, error);
           logLines.push(`❌ ${collectionName}: Erro ao excluir.`);
@@ -437,7 +425,7 @@ export default function Configuracoes() {
       }
 
       let finalMessage = `✅ Operação de exclusão concluída!\n\n`;
-      finalMessage += `Total de registros removidos: ${totalDeleted}\n\n`;
+      finalMessage += `Coleções limpas: ${totalDeleted}\n\n`;
       finalMessage += `Detalhes:\n${logLines.join('\n')}\n\n`;
 
             if (failedCollections.length > 0) {
@@ -847,7 +835,7 @@ Sistema MRS Ranking - Gestão Inteligente de Recursos Humanos e SST
 
           console.log('   Dados preparados:', employees);
 
-          const employeesCollection = collection(db, 'employees');
+          const employeesCollection = getTenantCollection('employees');
           const existingEmployeesSnapshot = await getDocs(employeesCollection);
           const employeeEmailMap = new Map(existingEmployeesSnapshot.docs.map(d => [d.data().email, d.id]));
           const batch = writeBatch(db);
@@ -856,10 +844,10 @@ Sistema MRS Ranking - Gestão Inteligente de Recursos Humanos e SST
             const existingId = employeeEmailMap.get(employee.email);
             if (existingId) {
               // Update existing employee
-              batch.update(doc(db, 'employees', existingId), employee);
+              batch.update(doc(getTenantCollection('employees'), existingId), employee);
             } else {
               // Add new employee
-              batch.set(doc(collection(db, 'employees')), employee);
+              batch.set(doc(getTenantCollection('employees')), employee);
             }
           }
           await batch.commit();
