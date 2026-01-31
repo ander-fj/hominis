@@ -57,12 +57,12 @@ Sistema completo e inteligente de gestão de recursos humanos e segurança do tr
 - **Frontend**: React + TypeScript + Vite
 - **Estilização**: Tailwind CSS
 - **Ícones**: Lucide React
-- **Banco de Dados**: Supabase (PostgreSQL)
-- **Autenticação**: Supabase Auth (preparado)
+- **Banco de Dados**: Firebase (Firestore)
+- **Autenticação**: Firebase Auth
 
 ## Estrutura do Banco de Dados
 
-### Tabelas Principais
+### Coleções Principais
 
 1. **employees** - Dados dos colaboradores
 2. **evaluation_criteria** - Critérios de avaliação configuráveis
@@ -79,11 +79,11 @@ Sistema completo e inteligente de gestão de recursos humanos e segurança do tr
 
 ### 1. Configuração Inicial
 
-Configure as variáveis de ambiente no arquivo `.env`:
-```
-VITE_SUPABASE_URL=sua_url_supabase
-VITE_SUPABASE_ANON_KEY=sua_chave_anonima
-```
+O projeto já está configurado com o Firebase. Para acessar em modo de desenvolvimento:
+
+1. Abra o console do navegador (F12)
+2. Digite `createAdmin()` e pressione Enter
+3. O sistema criará o usuário **admin@hominis.com** com senha **admin123** e fará o login automático.
 
 ### 2. Inserir Dados de Exemplo
 

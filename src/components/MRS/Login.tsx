@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { LogIn, AlertCircle, User, Lock } from 'lucide-react';
+import { signInWithEmailAndPassword } from 'firebase/auth';
+import { auth } from '../../lib/firebase';
 
 interface LoginProps {
   onLoginSuccess: () => void;
@@ -11,14 +13,6 @@ export default function Login({ onLoginSuccess }: LoginProps) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [apiKeyMissing, setApiKeyMissing] = useState(false);
-
-  useEffect(() => {
-    const API_KEY = import.meta.env.VITE_GOOGLE_SHEETS_API_KEY;
-    if (!API_KEY) {
-      setApiKeyMissing(true);
-    }
-  }, []);
   const [focusedField, setFocusedField] = useState<string | null>(null);
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -27,59 +21,21 @@ export default function Login({ onLoginSuccess }: LoginProps) {
     setLoading(true);
 
     try {
-      // Google Sheets API URL - usando CORS proxy
-      const SHEET_ID = '1pBV_1zzSG7wy1U9zxQNq7njkwItGJ7mF8aAgYkVMgwQ';
-      const API_KEY = import.meta.env.VITE_GOOGLE_SHEETS_API_KEY;
-
-      // Modo desenvolvimento: permite login com credenciais padrão se API Key não configurada
-      if (!API_KEY) {
-        if (username === 'admin' && password === 'admin') {
-          localStorage.setItem('isAuthenticated', 'true');
-          localStorage.setItem('username', username);
-          onLoginSuccess();
-          return;
-        } else {
-          setError('Modo desenvolvimento: use usuário "admin" e senha "admin"');
-          setLoading(false);
-          return;
-        }
-      }
-
-      const range = 'A:B'; // Coluna A = usuário, Coluna B = senha
-      const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${range}?key=${API_KEY}`;
-
-      const response = await fetch(url);
-
-      if (!response.ok) {
-        throw new Error(`Erro na API: ${response.status}`);
-      }
-
-      const data = await response.json();
-
-      if (!data.values) {
-        throw new Error('Erro ao carregar dados de autenticação. Verifique se a planilha está pública.');
-      }
-
-      // Verificar credenciais
-      const users = data.values.slice(1); // Pula o cabeçalho
-      const userFound = users.find(
-        (row: string[]) => row[0] === username && row[1] === password
-      );
-
-      if (userFound) {
-        // Login bem-sucedido
-        localStorage.setItem('isAuthenticated', 'true');
-        localStorage.setItem('username', username);
-        onLoginSuccess();
-      } else {
-        setError('Usuário ou senha inválidos');
-      }
-    } catch (err) {
+      await signInWithEmailAndPassword(auth, username, password);
+      
+      localStorage.setItem('isAuthenticated', 'true');
+      localStorage.setItem('username', username);
+      onLoginSuccess();
+    } catch (err: any) {
       console.error('Erro no login:', err);
-      if (err instanceof Error) {
-        setError(err.message);
+      if (err.code === 'auth/invalid-credential' || err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
+        setError('Email ou senha inválidos');
+      } else if (err.code === 'auth/invalid-email') {
+        setError('Formato de email inválido');
+      } else if (err.code === 'auth/too-many-requests') {
+        setError('Muitas tentativas. Tente novamente mais tarde.');
       } else {
-        setError('Erro ao conectar com o sistema de autenticação');
+        setError('Erro ao realizar login. Tente novamente.');
       }
     } finally {
       setLoading(false);
@@ -201,27 +157,6 @@ export default function Login({ onLoginSuccess }: LoginProps) {
               </motion.p>
             </motion.div>
 
-            {/* Aviso se API Key não configurada */}
-            {apiKeyMissing && (
-              <motion.div
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="bg-yellow-500/20 backdrop-blur-sm border border-yellow-400/30 rounded-xl p-4 mb-6"
-              >
-                <div className="flex items-start gap-3">
-                  <AlertCircle className="w-5 h-5 text-yellow-300 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-sm font-medium text-yellow-200 mb-1">
-                      API Key não configurada
-                    </p>
-                    <p className="text-xs text-yellow-200/80">
-                      Modo desenvolvimento ativo. Use usuário "admin" e senha "admin"
-                    </p>
-                  </div>
-                </div>
-              </motion.div>
-            )}
-
             {/* Formulário */}
             <form onSubmit={handleLogin} className="space-y-5">
               {/* Campo Usuário */}
@@ -234,7 +169,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
                   htmlFor="username"
                   className="block text-sm font-medium text-white/90 mb-2"
                 >
-                  Usuário
+                  Email
                 </label>
                 <motion.div
                   className="relative"
@@ -261,7 +196,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
                     onBlur={() => setFocusedField(null)}
                     required
                     className="w-full pl-12 pr-4 py-3.5 bg-white/10 backdrop-blur-sm border border-white/20 rounded-xl text-white placeholder-white/40 focus:bg-white/15 focus:border-blue-400/50 focus:ring-2 focus:ring-blue-400/20 outline-none transition-all duration-200"
-                    placeholder="Digite seu usuário"
+                    placeholder="Digite seu email"
                     disabled={loading}
                   />
                 </motion.div>
