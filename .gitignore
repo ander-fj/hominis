@@ -1,19 +1,23 @@
-# dependências
-node_modules/
-
-# build
-dist/
-
-# env
-.env
-.env.local
-.env.production
-.env.*
-
-# logs
+logs
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
-# sistema
+node_modules
+dist
+dist-ssr
+*.local
+
+.vscode/*
+!.vscode/extensions.json
+.idea
 .DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.env

@@ -1,2 +1,0 @@
-Unexpected argument: --list-archive-contents
-See more help with --help
