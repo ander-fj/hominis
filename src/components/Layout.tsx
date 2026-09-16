@@ -1,4 +1,4 @@
-import { ReactNode, useState } from 'react';
+﻿import { ReactNode, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { canAccessPage } from '@/shared/security/permissions';
 import { useMaintenance } from '@/context/MaintenanceContext';
@@ -101,7 +101,7 @@ export function Layout({
     <div className="flex min-h-screen bg-slate-50/95 dark:bg-slate-950/95 backdrop-blur-sm">
       <div className="fixed right-4 top-3 z-50 hidden lg:block"><OfflineStatus /></div>
       {/* Desktop Sidebar */}
-      <aside className={`sticky top-0 z-30 hidden h-screen overflow-y-auto shrink-0 flex-col border-r border-slate-200 bg-white/95 backdrop-blur-sm transition-[width] duration-300 dark:border-slate-800 dark:bg-slate-900/95 lg:flex ${sidebarCollapsed ? 'w-16' : 'w-64'}`}>
+      <aside className={`sticky top-0 z-30 hidden h-[calc(100vh-4px)] overflow-y-auto shrink-0 flex-col border-r border-slate-200 bg-white/95 backdrop-blur-sm transition-[width] duration-300 dark:border-slate-800 dark:bg-slate-900/95 lg:flex ${sidebarCollapsed ? 'w-16' : 'w-64'}`}>
         <div className={`flex items-center ${sidebarCollapsed ? 'justify-center' : 'gap-3'} px-3 py-5`}>
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500 text-white">
             <HardHat size={22} />
