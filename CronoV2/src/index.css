@@ -1,0 +1,157 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    @apply text-slate-900 antialiased;
+    overscroll-behavior-y: none;
+  }
+  .dark body {
+    @apply text-slate-100;
+  }
+}
+
+@layer components {
+  /* ===== Sistema de layout padronizado (referência: página Gestão) ===== */
+
+  /* Container principal: 100% da largura útil, sem overflow horizontal,
+     espaçamento vertical uniforme de 24px entre seções */
+  .page-container {
+    @apply block w-full min-w-0 space-y-6;
+  }
+
+  /* Cabeçalho de página: título + ações alinhadas; empilha em coluna no mobile */
+  .page-header {
+    @apply flex w-full min-w-0 flex-col gap-4 sm:flex-row sm:items-center sm:justify-between;
+  }
+
+  /* Grade de cards de métricas/KPIs: preenche 100% da largura com colunas
+     automáticas (mín. 260px) e altura igual entre os cards da mesma linha */
+  .card-grid {
+    @apply grid w-full min-w-0 items-stretch gap-4;
+    grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  }
+
+  /* Grade de cards de conteúdo (cadastros/listas em cards): mesma base,
+     com largura mínima maior por card */
+  .content-grid {
+    @apply grid w-full min-w-0 items-stretch gap-4;
+    grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+  }
+
+  .fluid-grid {
+    @apply grid w-full min-w-0 gap-6;
+    grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr));
+  }
+
+  /* Card de métrica: cresce proporcionalmente, altura igual na linha */
+  .metric-card {
+    @apply flex min-w-0 flex-col p-5;
+  }
+
+  /* Card de conteúdo (gráficos, listas, formulários em card) */
+  .content-card {
+    @apply flex min-w-0 flex-col p-5;
+  }
+
+  /* Tabelas: esticam até o limite do container pai; scroll horizontal
+     apenas quando a tela é menor que a tabela */
+  .table-scroll {
+    @apply w-full min-w-0 overflow-x-auto;
+  }
+}
+
+@layer utilities {
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+/* Smooth transitions for interactive elements */
+button, a, input, select, textarea {
+  @apply transition-colors;
+}
+
+/* Custom scrollbar for desktop */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: #475569;
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* ===== Marcadores do mapa de atividades (Leaflet) ===== */
+.activity-marker {
+  background: transparent;
+  border: none;
+}
+
+.am-pin {
+  width: 26px;
+  height: 26px;
+  border-radius: 9999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #fff;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.45);
+  cursor: pointer;
+}
+
+.am-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: #fff;
+  opacity: 0.95;
+}
+
+.am-pin.am-pin-late {
+  animation: am-pulse 1.8s ease-out infinite;
+}
+
+@keyframes am-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 12px rgba(239, 68, 68, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+  }
+}
+
+/* Leaflet: mantém o mapa legível em segundo plano mesmo em tema escuro */
+.dark .activity-map .leaflet-container {
+  background: #0f172a;
+}
+
+.leaflet-tooltip.activity-marker-tip {
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.18);
+  padding: 8px 12px;
+}

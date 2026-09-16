@@ -1,0 +1,3 @@
+import { Wifi, WifiOff, RefreshCw } from 'lucide-react';
+import { useOffline } from '@/context/OfflineContext';
+export function OfflineStatus() { const {online,pending,syncing,syncNow}=useOffline(); return <button onClick={syncNow} title={online ? 'Sincronizar dados pendentes' : 'Sem conexão'} className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold ${online?'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300':'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'}`}>{online?<Wifi size={15}/>:<WifiOff size={15}/>}<span>{online ? (pending ? `${pending} pendente(s)` : 'Sincronizado') : `${pending} salvo(s) offline`}</span>{syncing&&<RefreshCw size={14} className="animate-spin"/>}</button>; }
